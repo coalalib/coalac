@@ -1,0 +1,7 @@
+/.built*
+/.configured*
+/.dep_files
+/.prepared*
+/ipkg-*/
+/out/
+*.swp
