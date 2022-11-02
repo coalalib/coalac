@@ -1,6 +1,8 @@
 #ifndef _AEAD_H_
 #define _AEAD_H_
 
+#include <stddef.h>
+
 #define AEAD_TAG_SIZE	12
 
 enum Aead_Err {

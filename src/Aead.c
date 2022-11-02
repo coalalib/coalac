@@ -7,7 +7,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <coala/Mem.h>
 #include "Aead.h"
 
 struct Aead {
@@ -35,7 +34,7 @@ struct Aead *Aead(unsigned char *peerkey, size_t peerkey_size,
 		goto out;
 	}
 
-	a = Mem_calloc(1, sizeof *a);
+	a = calloc(1, sizeof *a);
 	if (a == NULL)
 		goto out;
 
@@ -75,7 +74,7 @@ out_enc_free:
 out_dec_free:
 	EVP_CIPHER_CTX_free(a->ctx_dec);
 out_free:
-	Mem_free(a);
+	free(a);
 	a = NULL;
 out:
 	if (errsv)
@@ -92,7 +91,7 @@ void Aead_Free(struct Aead *a)
 	EVP_CIPHER_CTX_free(a->ctx_dec);
 	EVP_CIPHER_CTX_free(a->ctx_enc);
 
-	Mem_free(a);
+	free(a);
 }
 
 int Aead_Open(struct Aead *a, unsigned char *cipher, size_t cipher_size,

@@ -1,48 +1,46 @@
 find_library (NDM_LIB ndm)
 find_library (CRYPTO_LIB crypto)
-find_package (Threads)
 
 set (SOURCES
 	Aead.c
 	ArqBlock1Layer.c
 	ArqBlock2Layer.c
 	Buf.c
+	CacheLayer.c
 	Coala.c
 	CoAPMessage.c
-	CoAPMessagePool.c
 	Err.c
-	HexString.c
+	Hkdf.c
 	LayerStack.c
 	LogLayer.c
-	Mem.c
-	RequestLayer.c
-	ResponseLayer.c
-	SecurityLayer.c
+	MsgCache.c
+	MsgQueue.c
+	ReqLayer.c
+	ResLayer.c
+	Sec.c
+	SecLayer.c
 	SlidingWindow.c
 	SlidingWindowPool.c
-	Sin.c
 	Str.c
-	TimeMono.c
 	Uri.c
 )
 
-add_library (coala SHARED
-	${SOURCES}
-	$<TARGET_OBJECTS:curve25519-donna>
-)
+add_library (coala SHARED ${SOURCES})
 
-target_include_directories (coala
-	PUBLIC ${CMAKE_SOURCE_DIR}/include
-	PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/third_party/curve25519-donna
-)
+add_library (coala_static STATIC ${SOURCES})
+set_target_properties (coala_static PROPERTIES OUTPUT_NAME coala)
 
-target_link_libraries (coala
-	${CMAKE_THREAD_LIBS_INIT}
-	${CRYPTO_LIB}
-	${NDM_LIB}
-)
+foreach (target coala coala_static)
+	target_include_directories (${target}
+		PUBLIC ${CMAKE_SOURCE_DIR}/include
+	)
 
-install (TARGETS coala DESTINATION lib)
+	target_link_libraries (${target}
+		${CRYPTO_LIB}
+		${NDM_LIB}
+	)
+
+	install (TARGETS ${target} DESTINATION lib)
+endforeach (target)
+
 install (DIRECTORY ${CMAKE_SOURCE_DIR}/include/ DESTINATION include)
-
-add_subdirectory (third_party)

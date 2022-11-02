@@ -1,6 +1,5 @@
 #include <arpa/inet.h>
-#include <coap/encode.h>
-#include <coap/pdu.h>
+#include <coap2/coap.h>
 #include <ndm/macro.h>
 #include <errno.h>
 #include <stdbool.h>
@@ -20,18 +19,18 @@ static void test_id(void **state)
 	struct CoAPMessage *m1, *m2;
 
 	/* Fixed ID */
-	m1 = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeGet, id);
+	m1 = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeGet, id, 0);
 	assert_non_null(m1);
 
 	ret1 = CoAPMessage_GetId(m1);
 	assert_true(ret1 != -1);
 	assert_int_equal(id, ret1);
 
-	CoAPMessage_Decref(m1);
+	CoAPMessage_Free(m1);
 
 	/* Generate ID */
-	m1 = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeGet, -1);
-	m2 = CoAPMessage(CoAPMessage_TypeNon, CoAPMessage_CodePost, -1);
+	m1 = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeGet, -1, 0);
+	m2 = CoAPMessage(CoAPMessage_TypeNon, CoAPMessage_CodePost, -1, 0);
 	assert_non_null(m1);
 	assert_non_null(m2);
 
@@ -42,8 +41,8 @@ static void test_id(void **state)
 
 	assert_true(ret1 != ret2);
 
-	CoAPMessage_Decref(m1);
-	CoAPMessage_Decref(m2);
+	CoAPMessage_Free(m1);
+	CoAPMessage_Free(m2);
 }
 
 static void test_payload(void **state)
@@ -54,7 +53,7 @@ static void test_payload(void **state)
 	struct CoAPMessage *m;
 	uint8_t *d;
 
-	m = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeNotFound, 0);
+	m = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeNotFound, 0, 0);
 	assert_non_null(m);
 
 	d = CoAPMessage_GetPayload(m, NULL, 0);
@@ -87,7 +86,7 @@ static void test_payload(void **state)
 	assert_null(d);
 	assert_int_equal(ENODATA, errno);
 
-	CoAPMessage_Decref(m);
+	CoAPMessage_Free(m);
 }
 
 static void test_token(void **state)
@@ -96,37 +95,37 @@ static void test_token(void **state)
 	const char token[] = "12345", long_token[] = "123456789";
 	int ret;
 	size_t size;
-	struct CoAPMessage *m;
+	struct CoAPMessage *m1;
 
-	m = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeGet, 0);
-	assert_non_null(m);
+	m1 = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeGet, 0, 0);
+	assert_non_null(m1);
 
 	/* Try to obtain token in message without it */
 	size = sizeof buf;
-	ret = CoAPMessage_GetToken(m, (uint8_t *)buf, &size);
+	ret = CoAPMessage_GetToken(m1, (uint8_t *)buf, &size);
 	assert_int_equal(-1, ret);
 	assert_int_equal(ENODATA, errno);
 
 	/* Simple token */
-	ret = CoAPMessage_SetToken(m, (uint8_t *)token, sizeof token);
+	ret = CoAPMessage_SetToken(m1, (uint8_t *)token, sizeof token);
 	assert_int_equal(0, ret);
 
 	size = sizeof buf;
-	ret = CoAPMessage_GetToken(m, (uint8_t *)buf, &size);
+	ret = CoAPMessage_GetToken(m1, (uint8_t *)buf, &size);
 	assert_int_equal(0, ret);
 	assert_int_equal(sizeof token, size);
 	assert_string_equal(token, buf);
 
 	/* Too long token */
-	ret = CoAPMessage_SetToken(m, (uint8_t *)long_token, sizeof long_token);
+	ret = CoAPMessage_SetToken(m1, (uint8_t *)long_token, sizeof long_token);
 	assert_int_equal(-1, ret);
 
 	/* Reset token */
-	ret = CoAPMessage_SetToken(m, NULL, 0);
+	ret = CoAPMessage_SetToken(m1, NULL, 0);
 	assert_int_equal(0, ret);
 
 	size = sizeof buf;
-	ret = CoAPMessage_GetToken(m, (uint8_t *)buf, &size);
+	ret = CoAPMessage_GetToken(m1, (uint8_t *)buf, &size);
 	assert_int_equal(-1, ret);
 	assert_int_equal(ENODATA, errno);
 
@@ -148,7 +147,21 @@ static void test_token(void **state)
 	ret = CoAPMessage_GenToken((uint8_t *)buf, sizeof buf);
 	assert_int_equal(0, ret);
 
-	CoAPMessage_Decref(m);
+	CoAPMessage_Free(m1);
+
+	struct CoAPMessage *m2;
+
+	m2 = CoAPMessage(CoAPMessage_TypeCon,
+			 CoAPMessage_CodeGet,
+			 0,
+			 CoAPMessage_FlagGenToken);
+	assert_non_null(m2);
+
+	size = sizeof buf;
+	ret = CoAPMessage_GetToken(m2, (uint8_t *)buf, &size);
+	assert_int_equal(0, ret);
+
+	CoAPMessage_Free(m2);
 }
 
 #define TOKEN_BIT	(1 << 0)
@@ -165,11 +178,11 @@ static void __test_tobytes_frombytes(unsigned mask)
 	uint8_t *d1, *d2;
 	unsigned id = 0xf1f2;
 
-	m = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeGet, id);
+	m = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeGet, id, 0);
 	assert_non_null(m);
 
-	p = coap_pdu_init(COAP_MESSAGE_CON, COAP_REQUEST_GET, htons(id),
-			  COAP_MAX_PDU_SIZE);
+	p = coap_pdu_init(COAP_MESSAGE_CON, COAP_REQUEST_GET, id,
+			  COAP_DEFAULT_MTU);
 	assert_non_null(p);
 
 	if (mask & TOKEN_BIT) {
@@ -228,7 +241,7 @@ static void __test_tobytes_frombytes(unsigned mask)
 			assert_int_equal(0, ret);
 
 			ret = coap_add_option(p, opt_num,
-					      coap_encode_var_bytes(t, v), t);
+					      coap_encode_var_safe(t, sizeof v, v), t);
 			assert_true(ret > 0);
 
 			opt_num++;
@@ -297,9 +310,14 @@ static void __test_tobytes_frombytes(unsigned mask)
 	d1 = CoAPMessage_ToBytes(m, &s1);
 	assert_non_null(d1);
 
+	coap_pdu_encode_header(p, COAP_PROTO_UDP);
+
+	uint8_t *p_tok = p->token - p->hdr_size;
+	size_t p_len = p->used_size + p->hdr_size;
+
 	/*
-	for (unsigned i = 0; i < p->length; i++) {
-		printf("%02hhx ", ((uint8_t *)(p->hdr))[i]);
+	for (unsigned i = 0; i < p_len; i++) {
+		printf("%02hhx ", ((uint8_t *)(p_tok))[i]);
 		if (i % 16 == 15)
 			putchar('\n');
 	}
@@ -313,10 +331,10 @@ static void __test_tobytes_frombytes(unsigned mask)
 	}
 	*/
 
-	assert_int_equal(p->length, s1);
-	assert_memory_equal(p->hdr, d1, s1);
+	assert_int_equal(p_len, s1);
+	assert_memory_equal(p_tok, d1, s1);
 
-	CoAPMessage_Decref(m);
+	CoAPMessage_Free(m);
 	coap_delete_pdu(p);
 
 	/* bytes -> CoAPMessage -> bytes */
@@ -329,7 +347,7 @@ static void __test_tobytes_frombytes(unsigned mask)
 	assert_int_equal(s1, s2);
 	assert_memory_equal(d1, d2, s1);
 
-	CoAPMessage_Decref(m);
+	CoAPMessage_Free(m);
 	free(d1);
 	free(d2);
 }
@@ -401,7 +419,7 @@ static void test_coap_message_get_options(void **state)
 	struct CoAPMessage_OptionHead h = TAILQ_HEAD_INITIALIZER(h);
 	const char *arr[] = {"welcome", "to", "sun", "trope"};
 
-	m = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeGet, -1);
+	m = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeGet, -1, 0);
 	assert_non_null(m);
 
 	for (unsigned i = 0; i < NDM_ARRAY_SIZE(arr); i++) {
@@ -429,7 +447,7 @@ static void test_coap_message_get_options(void **state)
 	assert_int_equal(NDM_ARRAY_SIZE(arr), n);
 
 	CoAPMessage_GetOptionsFree(&h);
-	CoAPMessage_Decref(m);
+	CoAPMessage_Free(m);
 }
 
 static void test_coap_message_get_option_uint(void **state)
@@ -438,7 +456,7 @@ static void test_coap_message_get_option_uint(void **state)
 	struct CoAPMessage *m;
 	uint32_t arr[] = {0, 1, 255, 65535, 65536}, val;
 
-	m = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeGet, -1);
+	m = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeGet, -1, 0);
 	assert_non_null(m);
 
 	for (unsigned i = 0; i < NDM_ARRAY_SIZE(arr); i++) {
@@ -456,7 +474,7 @@ static void test_coap_message_get_option_uint(void **state)
 	assert_int_equal(-1, ret);
 	assert_int_equal(ENOENT, errno);
 
-	CoAPMessage_Decref(m);
+	CoAPMessage_Free(m);
 }
 
 static void test_coap_message_get_option_opaque(void **state)
@@ -466,7 +484,7 @@ static void test_coap_message_get_option_opaque(void **state)
 	struct CoAPMessage *m;
 	uint8_t *d;
 
-	m = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeGet, -1);
+	m = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeGet, -1, 0);
 	assert_non_null(m);
 
 	ret = CoAPMessage_AddOptionOpaque(m, 0, NULL, 0);
@@ -484,7 +502,7 @@ static void test_coap_message_get_option_opaque(void **state)
 	assert_int_equal(1, s);
 	assert_memory_equal("1", d, 1);
 
-	CoAPMessage_Decref(m);
+	CoAPMessage_Free(m);
 }
 
 static void test_coap_message_get_option_string(void **state)
@@ -493,7 +511,7 @@ static void test_coap_message_get_option_string(void **state)
 	int ret;
 	struct CoAPMessage *m;
 
-	m = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeGet, -1);
+	m = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeGet, -1, 0);
 	assert_non_null(m);
 
 	for (unsigned i = 0; i < NDM_ARRAY_SIZE(arr); i++) {
@@ -514,7 +532,7 @@ static void test_coap_message_get_option_string(void **state)
 		free(s);
 	}
 
-	CoAPMessage_Decref(m);
+	CoAPMessage_Free(m);
 }
 
 static void test_coap_message_get_set_code(void **state)
@@ -522,7 +540,7 @@ static void test_coap_message_get_set_code(void **state)
 	int ret;
 	struct CoAPMessage *m;
 
-	m = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeGet, -1);
+	m = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeGet, -1, 0);
 	assert_non_null(m);
 
 	ret = CoAPMessage_GetCode(m);
@@ -534,7 +552,7 @@ static void test_coap_message_get_set_code(void **state)
 	ret = CoAPMessage_GetCode(m);
 	assert_int_equal(CoAPMessage_CodePost, ret);
 
-	CoAPMessage_Decref(m);
+	CoAPMessage_Free(m);
 }
 
 static void test_coap_message_get_set_id(void **state)
@@ -542,7 +560,7 @@ static void test_coap_message_get_set_id(void **state)
 	int ret;
 	struct CoAPMessage *m;
 
-	m = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeGet, 0);
+	m = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeGet, 0, 0);
 	assert_non_null(m);
 
 	ret = CoAPMessage_GetId(m);
@@ -554,7 +572,7 @@ static void test_coap_message_get_set_id(void **state)
 	ret = CoAPMessage_GetId(m);
 	assert_int_equal(0xffff, ret);
 
-	CoAPMessage_Decref(m);
+	CoAPMessage_Free(m);
 }
 
 static void test_coap_message_get_set_type(void **state)
@@ -562,7 +580,7 @@ static void test_coap_message_get_set_type(void **state)
 	int ret;
 	struct CoAPMessage *m;
 
-	m = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeGet, -1);
+	m = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeGet, -1, 0);
 	assert_non_null(m);
 
 	ret = CoAPMessage_GetType(m);
@@ -574,7 +592,7 @@ static void test_coap_message_get_set_type(void **state)
 	ret = CoAPMessage_GetType(m);
 	assert_int_equal(CoAPMessage_TypeNon, ret);
 
-	CoAPMessage_Decref(m);
+	CoAPMessage_Free(m);
 }
 
 static void test_coap_message_get_set_path(void **state)
@@ -583,14 +601,14 @@ static void test_coap_message_get_set_path(void **state)
 	int ret;
 	struct CoAPMessage *m;
 
-	m = CoAPMessage(CoAPMessage_TypeNon, CoAPMessage_CodePost, -1);
+	m = CoAPMessage(CoAPMessage_TypeNon, CoAPMessage_CodePost, -1, 0);
 	assert_non_null(m);
 
-	s = CoAPMessage_GetUriPath(NULL, false);
+	s = CoAPMessage_GetUriPath(NULL);
 	assert_null(s);
 	assert_int_equal(EINVAL, errno);
 
-	s = CoAPMessage_GetUriPath(m, false);
+	s = CoAPMessage_GetUriPath(m);
 	assert_null(s);
 	assert_int_equal(ENOENT, errno);
 
@@ -617,7 +635,7 @@ static void test_coap_message_get_set_path(void **state)
 	ret = CoAPMessage_SetUriPath(m, "/first/second");
 	assert_int_equal(0, ret);
 
-	s = CoAPMessage_GetUriPath(m, false);
+	s = CoAPMessage_GetUriPath(m);
 	assert_non_null(s);
 	assert_string_equal("/first/second", s);
 	free(s);
@@ -625,17 +643,12 @@ static void test_coap_message_get_set_path(void **state)
 	ret = CoAPMessage_SetUriPath(m, "/first%20second");
 	assert_int_equal(0, ret);
 
-	s = CoAPMessage_GetUriPath(m, false);
-	assert_non_null(s);
-	assert_string_equal("/first second", s);
-	free(s);
-
-	s = CoAPMessage_GetUriPath(m, true);
+	s = CoAPMessage_GetUriPath(m);
 	assert_non_null(s);
 	assert_string_equal("/first+second", s);
 	free(s);
 
-	CoAPMessage_Decref(m);
+	CoAPMessage_Free(m);
 }
 
 static void test_coap_message_get_set_query(void **state)
@@ -644,14 +657,14 @@ static void test_coap_message_get_set_query(void **state)
 	int ret;
 	struct CoAPMessage *m;
 
-	m = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeGet, -1);
+	m = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeGet, -1, 0);
 	assert_non_null(m);
 
-	s = CoAPMessage_GetUriQuery(NULL, false);
+	s = CoAPMessage_GetUriQuery(NULL);
 	assert_null(s);
 	assert_int_equal(EINVAL, errno);
 
-	s = CoAPMessage_GetUriQuery(m, false);
+	s = CoAPMessage_GetUriQuery(m);
 	assert_null(s);
 	assert_int_equal(ENOENT, errno);
 
@@ -674,7 +687,7 @@ static void test_coap_message_get_set_query(void **state)
 	ret = CoAPMessage_SetUriQuery(m, "?a=b&c=d&e");
 	assert_int_equal(0, ret);
 
-	s = CoAPMessage_GetUriQuery(m, false);
+	s = CoAPMessage_GetUriQuery(m);
 	assert_non_null(s);
 	assert_string_equal("?a=b&c=d&e", s);
 	free(s);
@@ -682,17 +695,12 @@ static void test_coap_message_get_set_query(void **state)
 	ret = CoAPMessage_SetUriQuery(m, "?a=b&c=firm ware&e");
 	assert_int_equal(0, ret);
 
-	s = CoAPMessage_GetUriQuery(m, false);
-	assert_non_null(s);
-	assert_string_equal("?a=b&c=firm ware&e", s);
-	free(s);
-
-	s = CoAPMessage_GetUriQuery(m, true);
+	s = CoAPMessage_GetUriQuery(m);
 	assert_non_null(s);
 	assert_string_equal("?a=b&c=firm+ware&e", s);
 	free(s);
 
-	CoAPMessage_Decref(m);
+	CoAPMessage_Free(m);
 }
 
 static void test_coap_message_get_set_uri(void **state)
@@ -701,10 +709,10 @@ static void test_coap_message_get_set_uri(void **state)
 	int ret;
 	struct CoAPMessage *m;
 
-	m = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeGet, -1);
+	m = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeGet, -1, 0);
 	assert_non_null(m);
 
-	s = CoAPMessage_GetUri(NULL, false);
+	s = CoAPMessage_GetUri(NULL);
 	assert_null(s);
 	assert_int_equal(EINVAL, errno);
 
@@ -727,7 +735,7 @@ static void test_coap_message_get_set_uri(void **state)
 	ret = CoAPMessage_SetUri(m, "coap://coap.me/welcome", 0);
 	assert_int_equal(0, ret);
 
-	s = CoAPMessage_GetUri(m, false);
+	s = CoAPMessage_GetUri(m);
 	assert_non_null(s);
 	assert_string_equal("coap://coap.me/welcome", s);
 	free(s);
@@ -736,7 +744,7 @@ static void test_coap_message_get_set_uri(void **state)
 	ret = CoAPMessage_SetUri(m, "coaps://1.2.3.4/a/b/c/d", 0);
 	assert_int_equal(0, ret);
 
-	s = CoAPMessage_GetUri(m, false);
+	s = CoAPMessage_GetUri(m);
 	assert_non_null(s);
 	assert_string_equal("coaps://1.2.3.4/a/b/c/d", s);
 	free(s);
@@ -745,7 +753,7 @@ static void test_coap_message_get_set_uri(void **state)
 	ret = CoAPMessage_SetUri(m, "coap://[2001:db8:85a3:8d3:1319:8a2e:370:7348]", 0);
 	assert_int_equal(0, ret);
 
-	s = CoAPMessage_GetUri(m, false);
+	s = CoAPMessage_GetUri(m);
 	assert_non_null(s);
 	assert_string_equal("coap://[2001:db8:85a3:8d3:1319:8a2e:370:7348]", s);
 	free(s);
@@ -754,17 +762,22 @@ static void test_coap_message_get_set_uri(void **state)
 	ret = CoAPMessage_SetUri(m, "coaps://coap.me/a/b b/c?fi=1&se=2 2&th", 0);
 	assert_int_equal(0, ret);
 
-	s = CoAPMessage_GetUri(m, false);
-	assert_non_null(s);
-	assert_string_equal("coaps://coap.me/a/b b/c?fi=1&se=2 2&th", s);
-	free(s);
-
-	s = CoAPMessage_GetUri(m, true);
+	s = CoAPMessage_GetUri(m);
 	assert_non_null(s);
 	assert_string_equal("coaps://coap.me/a/b+b/c?fi=1&se=2+2&th", s);
 	free(s);
 
-	CoAPMessage_Decref(m);
+	ret = CoAPMessage_SetUri(m, "coaps://%s:%d/info",
+				 CoAPMessage_SetUriFlagFormat,
+				 "1.2.3.4", 1234);
+	assert_int_equal(0, ret);
+
+	s = CoAPMessage_GetUri(m);
+	assert_non_null(s);
+	assert_string_equal("coaps://1.2.3.4:1234/info", s);
+	free(s);
+
+	CoAPMessage_Free(m);
 }
 
 static void test_coap_message_get_set_secure(void **state)
@@ -773,7 +786,7 @@ static void test_coap_message_get_set_secure(void **state)
 	int ret;
 	struct CoAPMessage *m;
 
-	m = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeGet, -1);
+	m = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeGet, -1, 0);
 	assert_non_null(m);
 
 	/* Invalid params */
@@ -819,17 +832,65 @@ static void test_coap_message_get_set_secure(void **state)
 	ret = CoAPMessage_IsSecure(m);
 	assert_int_equal(true, ret);
 
-	CoAPMessage_Decref(m);
+	CoAPMessage_Free(m);
+}
+
+static void test_coap_message_get_set_proxy_security_id(void **state)
+{
+	int ret;
+	struct CoAPMessage *m;
+	uint32_t v = 0;
+
+	m = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeGet, -1, 0);
+	assert_non_null(m);
+
+	/* Invalid params */
+	ret = CoAPMessage_GetProxySecurityId(NULL, NULL);
+	assert_int_equal(-1, ret);
+	assert_int_equal(EINVAL, errno);
+
+	ret = CoAPMessage_GetProxySecurityId(m, NULL);
+	assert_int_equal(-1, ret);
+	assert_int_equal(EINVAL, errno);
+
+	ret = CoAPMessage_SetProxySecurityId(NULL, 0);
+	assert_int_equal(-1, ret);
+	assert_int_equal(EINVAL, errno);
+
+	/* Initial state  */
+	ret = CoAPMessage_GetProxySecurityId(m, &v);
+	assert_int_equal(-1, ret);
+	assert_int_equal(ENOENT, errno);
+
+	/* Set 1 */
+	ret = CoAPMessage_SetProxySecurityId(m, 0x12345678);
+	assert_int_equal(0, ret);
+
+	/* Get 1 */
+	ret = CoAPMessage_GetProxySecurityId(m, &v);
+	assert_int_equal(0, ret);
+	assert_int_equal(0x12345678, v);
+
+	/* Set 2 */
+	ret = CoAPMessage_SetProxySecurityId(m, 0xa1a2a3a4);
+	assert_int_equal(0, ret);
+
+	/* Get 2 */
+	ret = CoAPMessage_GetProxySecurityId(m, &v);
+	assert_int_equal(0, ret);
+	assert_int_equal(0xa1a2a3a4, v);
+
+	CoAPMessage_Free(m);
 }
 
 static void test_coap_message_get_set_option_block(void **state)
 {
-	enum CoAPMessage_Code code = CoAPMessage_OptionCodeBlock1;
+	enum CoAPMessage_OptionCode code = CoAPMessage_OptionCodeBlock1;
 	int ret;
 	struct CoAPMessage *m;
 	struct CoAPMessage_Block b1, b2;
 
-	m = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeGet, -1);
+	m = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeGet, -1, 0);
 	assert_non_null(m);
 
 	/* Invalid params */
@@ -873,7 +934,7 @@ static void test_coap_message_get_set_option_block(void **state)
 	assert_int_equal(0, ret);
 	assert_memory_equal(&b1, &b2, sizeof b1);
 
-	CoAPMessage_Decref(m);
+	CoAPMessage_Free(m);
 }
 
 static void test_coap_message_get_set_copy_sa(void **state)
@@ -883,10 +944,10 @@ static void test_coap_message_get_set_copy_sa(void **state)
 	struct sockaddr_in in;
 	struct ndm_ip_sockaddr_t sa1 = NDM_IP_SOCKADDR_ANY, sa2 = {};
 
-	m1 = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeGet, -1);
+	m1 = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeGet, -1, 0);
 	assert_non_null(m1);
 
-	m2 = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeGet, -1);
+	m2 = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeGet, -1, 0);
 	assert_non_null(m2);
 
 	in.sin_family = AF_INET;
@@ -959,41 +1020,8 @@ static void test_coap_message_get_set_copy_sa(void **state)
 	ret = ndm_ip_sockaddr_is_equal(&sa1, &sa2);
 	assert_true(ret);
 
-	CoAPMessage_Decref(m1);
-	CoAPMessage_Decref(m2);
-}
-
-static void test_coap_message_get_set_handler(void **state)
-{
-	int ret;
-	struct CoAPMessage *m;
-	void *h;
-
-	m = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeGet, -1);
-	assert_non_null(m);
-
-	/* Invalid params */
-	ret = CoAPMessage_SetHandler(NULL, NULL);
-	assert_int_equal(-1, ret);
-	assert_int_equal(EINVAL, errno);
-
-	h = CoAPMessage_GetHandler(NULL);
-	assert_null(h);
-	assert_int_equal(EINVAL, errno);
-
-	ret = CoAPMessage_SetHandler(m, (void *)1);
-	assert_int_equal(0, ret);
-
-	h = CoAPMessage_GetHandler(m);
-	assert_true(h == (void *)1);
-
-	ret = CoAPMessage_SetHandler(m, NULL);
-	assert_int_equal(0, ret);
-
-	h = CoAPMessage_GetHandler(m);
-	assert_null(h);
-
-	CoAPMessage_Decref(m);
+	CoAPMessage_Free(m1);
+	CoAPMessage_Free(m2);
 }
 
 static void test_coap_message_clone(void **state)
@@ -1002,7 +1030,7 @@ static void test_coap_message_clone(void **state)
 	int ret;
 	struct CoAPMessage *m, *cp;
 
-	m = CoAPMessage(CoAPMessage_TypeNon, CoAPMessage_CodePost, -1);
+	m = CoAPMessage(CoAPMessage_TypeNon, CoAPMessage_CodePost, -1, 0);
 	assert_non_null(m);
 
 	ret = CoAPMessage_SetUri(m, "coap://1.2.3.4/info", 0);
@@ -1019,34 +1047,34 @@ static void test_coap_message_clone(void **state)
 	ret = CoAPMessage_SetToken(m, (uint8_t *)"1234", 4);
 	assert_int_equal(0, ret);
 
-	cp = CoAPMessage_Clone(NULL, false);
+	cp = CoAPMessage_Clone(NULL, 0);
 	assert_null(cp);
 	assert_int_equal(EINVAL, errno);
 
 	/* With payload */
-	cp = CoAPMessage_Clone(m, true);
+	cp = CoAPMessage_Clone(m, CoAPMessage_CloneFlagPayload);
 	assert_non_null(cp);
 
-	ret = CoAPMessage_Equals(m, cp);
+	ret = CoAPMessage_Equals(m, cp, 0);
 	assert_int_equal(1, ret);
 
-	CoAPMessage_Decref(cp);
+	CoAPMessage_Free(cp);
 
 	/* Without payload */
-	cp = CoAPMessage_Clone(m, false);
+	cp = CoAPMessage_Clone(m, 0);
 	assert_non_null(cp);
 
-	ret = CoAPMessage_Equals(m, cp);
+	ret = CoAPMessage_Equals(m, cp, 0);
 	assert_int_equal(0, ret);
 
 	ret = CoAPMessage_SetPayload(m, NULL, 0);
 	assert_int_equal(0, ret);
 
-	ret = CoAPMessage_Equals(m, cp);
+	ret = CoAPMessage_Equals(m, cp, 0);
 	assert_int_equal(1, ret);
 
-	CoAPMessage_Decref(cp);
-	CoAPMessage_Decref(m);
+	CoAPMessage_Free(cp);
+	CoAPMessage_Free(m);
 }
 
 static void test_coap_message_codestr(void **state)
@@ -1106,10 +1134,10 @@ void test_coap_message_copy_option(void **state)
 	int ret;
 	struct CoAPMessage *m1, *m2;
 
-	m1 = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeEmpty, -1);
+	m1 = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeEmpty, -1, 0);
 	assert_non_null(m1);
 
-	m2 = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeEmpty, -1);
+	m2 = CoAPMessage(CoAPMessage_TypeCon, CoAPMessage_CodeEmpty, -1, 0);
 	assert_non_null(m2);
 
 	/* Invalid params */
@@ -1145,6 +1173,7 @@ void test_coap_message_copy_option(void **state)
 	assert_int_equal(0, ret);
 
 	ret = CoAPMessage_CopyOption(m2, m1, CoAPMessage_OptionCodeUriScheme);
+	assert_int_equal(0, ret);
 
 	uint8_t *d;
 	d = CoAPMessage_GetOptionOpaque(m2, CoAPMessage_OptionCodeUriScheme,
@@ -1152,8 +1181,8 @@ void test_coap_message_copy_option(void **state)
 	assert_null(d);
 	assert_int_equal(ENODATA, errno);
 
-	CoAPMessage_Decref(m1);
-	CoAPMessage_Decref(m2);
+	CoAPMessage_Free(m1);
+	CoAPMessage_Free(m2);
 }
 
 int main(int argc, char *argv[])
@@ -1175,9 +1204,9 @@ int main(int argc, char *argv[])
 		cmocka_unit_test(test_coap_message_get_set_query),
 		cmocka_unit_test(test_coap_message_get_set_uri),
 		cmocka_unit_test(test_coap_message_get_set_secure),
+		cmocka_unit_test(test_coap_message_get_set_proxy_security_id),
 		cmocka_unit_test(test_coap_message_get_set_option_block),
 		cmocka_unit_test(test_coap_message_get_set_copy_sa),
-		cmocka_unit_test(test_coap_message_get_set_handler),
 		cmocka_unit_test(test_coap_message_clone),
 		cmocka_unit_test(test_coap_message_codestr),
 		cmocka_unit_test(test_coap_message_copy_option)

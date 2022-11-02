@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#include "Str.h"
+#include <coala/Str.h>
 
 enum Unit {
 	Unit_B,

@@ -3,10 +3,9 @@
 #include <string.h>
 
 #include <coala/khash.h>
-#include <coala/Mem.h>
+#include <coala/Str.h>
 
 #include "SlidingWindow.h"
-#include "Str.h"
 
 /*
  * Use as param for Read/WriteBlock?
@@ -45,7 +44,7 @@ struct SlidingWindow *SlidingWindow(enum SlidingWindow_Dir d,
 		goto out;
 	}
 
-	if ((sw = Mem_calloc(1, sizeof(*sw))) == NULL ||
+	if ((sw = calloc(1, sizeof(*sw))) == NULL ||
 	    (sw->map = kh_init(BlockMap)) == NULL) {
 		errno = ENOMEM;
 		goto out_free;
@@ -58,7 +57,7 @@ struct SlidingWindow *SlidingWindow(enum SlidingWindow_Dir d,
 	goto out;
 
 out_free:
-	Mem_free(sw);
+	free(sw);
 	sw = NULL;
 out:
 	return sw;
@@ -93,12 +92,12 @@ void SlidingWindow_Free(struct SlidingWindow *sw)
 			continue;
 
 		b = kh_val(sw->map, it);
-		Mem_free(b->data);
-		Mem_free(b);
+		free(b->data);
+		free(b);
 	}
 
 	kh_destroy(BlockMap, sw->map);
-	Mem_free(sw);
+	free(sw);
 }
 
 int SlidingWindow_Write(struct SlidingWindow *sw, void *d, size_t s)
@@ -117,7 +116,7 @@ int SlidingWindow_Write(struct SlidingWindow *sw, void *d, size_t s)
 	}
 
 	for (size_t i = 0, j = 0; i < s; i += sw->block_size, j++) {
-		bool last = false;
+		bool last;
 		int ret;
 		khiter_t it;
 		size_t p_size;
@@ -127,11 +126,11 @@ int SlidingWindow_Write(struct SlidingWindow *sw, void *d, size_t s)
 		last = s - i <= sw->block_size;
 		p_size = last ? s - i : sw->block_size;
 
-		if ((b = Mem_calloc(1, sizeof(*b))) == NULL ||
-		    (p = Mem_malloc(p_size)) == NULL ||
+		if ((b = calloc(1, sizeof(*b))) == NULL ||
+		    (p = malloc(p_size)) == NULL ||
 		     ((it = kh_put(BlockMap, sw->map, j, &ret)), ret < 0)) {
-			Mem_free(b);
-			Mem_free(p);
+			free(b);
+			free(p);
 			errsv = ENOMEM;
 			goto out;
 		}
@@ -175,9 +174,9 @@ void *SlidingWindow_Read(struct SlidingWindow *sw, size_t *s)
 
 		b = kh_val(sw->map, it);
 
-		if ((t = Mem_realloc(m, full_size + b->size)) == NULL) {
+		if ((t = realloc(m, full_size + b->size)) == NULL) {
 			errsv = errno;
-			Mem_free(m);
+			free(m);
 			m = NULL;
 			goto out;
 		}
@@ -270,9 +269,9 @@ int SlidingWindow_WriteBlock(struct SlidingWindow *sw, unsigned block_num,
 		return -1;
 	}
 
-	if ((b = Mem_calloc(1, sizeof(*b))) == NULL ||
-	     (d = Mem_malloc(size)) == NULL) {
-		Mem_free(b);
+	if ((b = calloc(1, sizeof(*b))) == NULL ||
+	     (d = malloc(size)) == NULL) {
+		free(b);
 		return -1;
 	}
 
@@ -396,7 +395,6 @@ out:
 int SlidingWindow_Advance(struct SlidingWindow *sw, bool *complete)
 {
 	bool last = false;
-	khiter_t it;
 	unsigned i, beg, end;
 
 	if (sw == NULL) {
@@ -408,6 +406,7 @@ int SlidingWindow_Advance(struct SlidingWindow *sw, bool *complete)
 	end = beg + sw->win_size;
 
 	for (i = beg; i < end; i++) {
+		khiter_t it;
 		struct Block *b;
 
 		it = kh_get(BlockMap, sw->map, i);

@@ -24,31 +24,31 @@ static void Test_1(void **state)
 	sw2 = SlidingWindow(SlidingWindow_DirOutput, 3, 4);
 	assert_non_null(sw2);
 
-	sw3 = SlidingWindowPool_Get(p, "tok1", NULL, NULL);
+	sw3 = SlidingWindowPool_Get(p, "tok1", NULL);
 	assert_null(sw3);
 	assert_int_equal(ENOENT, errno);
 
-	ret = SlidingWindowPool_Set(p, "tok1", sw1, NULL, NULL);
+	ret = SlidingWindowPool_Set(p, "tok1", sw1, NULL);
 	assert_int_equal(0, ret);
 
-	ret = SlidingWindowPool_Set(p, "tok1", sw2, NULL, NULL);
+	ret = SlidingWindowPool_Set(p, "tok1", sw2, NULL);
 	assert_int_equal(-1, ret);
 	assert_int_equal(EEXIST, errno);
 
-	ret = SlidingWindowPool_Set(p, "tok2", sw2, NULL, NULL);
+	ret = SlidingWindowPool_Set(p, "tok2", sw2, NULL);
 	assert_int_equal(0, ret);
 
-	sw3 = SlidingWindowPool_Get(p, "tok1", NULL, NULL);
+	sw3 = SlidingWindowPool_Get(p, "tok1", NULL);
 	assert_non_null(sw3);
 
 	ret = SlidingWindowPool_Del(p, "tok1");
 	assert_int_equal(0, ret);
 
-	sw3 = SlidingWindowPool_Get(p, "tok1", NULL, NULL);
+	sw3 = SlidingWindowPool_Get(p, "tok1", NULL);
 	assert_null(sw3);
 	assert_int_equal(ENOENT, errno);
 
-	sw3 = SlidingWindowPool_Get(p, "tok2", NULL, NULL);
+	sw3 = SlidingWindowPool_Get(p, "tok2", NULL);
 	assert_non_null(sw3);
 
 	SlidingWindowPool_Free(p);

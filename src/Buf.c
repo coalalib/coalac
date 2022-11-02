@@ -7,7 +7,6 @@
 #include <stdarg.h>
 
 #include <coala/Buf.h>
-#include <coala/Mem.h>
 
 /*
  * @file
@@ -29,9 +28,7 @@ struct Buf_Handle {
  */
 struct Buf_Handle *Buf(void)
 {
-	struct Buf_Handle *h;
-
-	return Mem_calloc(1, sizeof *h);
+	return calloc(1, sizeof(struct Buf_Handle));
 }
 
 /*
@@ -44,8 +41,8 @@ void Buf_Free(struct Buf_Handle *h)
 	if (h == NULL)
 		return;
 
-	Mem_free(h->data);
-	Mem_free(h);
+	free(h->data);
+	free(h);
 }
 
 /*
@@ -58,7 +55,7 @@ void Buf_Clear(struct Buf_Handle *h)
 	if (h == NULL)
 		return;
 
-	Mem_free(h->data);
+	free(h->data);
 	h->data = NULL;
 	h->size = 0;
 }
@@ -74,14 +71,14 @@ void Buf_Clear(struct Buf_Handle *h)
  */
 int Buf_Add(struct Buf_Handle *h, const void *data, size_t size)
 {
-	void *m;
+	char *m;
 
 	if (h == NULL || data == NULL || !size) {
 		errno = EINVAL;
 		return -1;
 	}
 
-	m = Mem_realloc(h->data, h->size + size);
+	m = realloc(h->data, h->size + size);
 	if (m == NULL)
 		return -1;
 
@@ -153,7 +150,7 @@ int Buf_AddFormatStr(struct Buf_Handle *h, const char *fmt, ...)
 	}
 
 	ret = Buf_AddStr(h, s);
-	Mem_free(s);
+	free(s);
 
 	return ret;
 }
@@ -185,7 +182,7 @@ void *Buf_GetData(struct Buf_Handle *h, size_t *size, bool alloc)
 	s = h->size;
 
 	if (alloc) {
-		void *q = Mem_malloc(s);
+		void *q = malloc(s);
 		if (q == NULL)
 			return NULL;
 

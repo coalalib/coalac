@@ -1,7 +1,7 @@
-#include <coala/Buf.h>
-#include <coala/Coala.h>
-#include <ndm/log.h>
-#include <ndm/int.h>
+#include <netinet/in.h>
+#include <sys/poll.h>
+#include <sys/socket.h>
+#include <sys/types.h>
 #include <errno.h>
 #include <libgen.h>
 #include <stdlib.h>
@@ -9,40 +9,75 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <coala/Buf.h>
+#include <coala/Coala.h>
+#include <ndm/log.h>
+#include <ndm/int.h>
+
+#define POLL_TIMEOUT	333
+
 static void help_print(FILE *fp, const char *pname)
 {
 	fprintf(fp,
-		"Usage: %s [-f file] [-h] [-i id] [-m method] [-N] [-p port] "
+		"Usage: %s [-c cookie] [-f file] [-h] [-i id] [-m method] [-N] [-p port] "
 		"[-T string] [-v num ] URI\n",
 		pname);
 }
 
-static int handler(struct Coala *c, struct CoAPMessage *m)
+static void cb(struct Coala *c, int fd, enum CoAPMessage_CbErr err,
+	       struct CoAPMessage *m, void *arg)
 {
-	CoAPMessage_Print(m, stdout);
+	if (err)
+		printf("error: %d\n", err);
+	else
+		CoAPMessage_Print(m, stdout);
+}
 
-	return 0;
+static int sock_init(uint16_t port)
+{
+	int fd;
+	struct sockaddr_in sa = {
+		.sin_family = AF_INET,
+		.sin_port = htons(port)
+	};
+
+	if ((fd = socket(AF_INET, SOCK_DGRAM, 0)) < 0)
+		return -1;
+
+	if (bind(fd, (struct sockaddr *)&sa, sizeof sa) < 0) {
+		int errsv = errno;
+		close(fd);
+		errno = errsv;
+		return -1;
+	}
+
+	return fd;
 }
 
 int main(int argc, char *argv[])
 {
 	bool id_set = false, tok_set = false;
-	char *fname_in = NULL, *pname;
+	char *cookie = NULL, *fname_in = NULL, *pname;
 	const char *uri;
 	enum CoAPMessage_Code code = CoAPMessage_CodeGet;
 	enum CoAPMessage_Type type = CoAPMessage_TypeCon;
+	int res = EXIT_FAILURE;
 	struct Coala *c;
-	int o;
-	size_t l;
-	struct CoAPMessage *m;
+	int fd, o;
+	size_t l = 0;
+	struct CoAPMessage *m = NULL;
 	uint8_t tok[COAP_MESSAGE_MAX_TOKEN_SIZE], verbose = LDEBUG_2;
 	uint16_t id, port = 0;
 
 	pname = basename(argv[0]);
 	srandom(time(NULL));
 
-	while ((o = getopt(argc, argv, "f:hi:m:Np:T:v:")) != -1) {
+	while ((o = getopt(argc, argv, "c:f:hi:m:Np:T:v:")) != -1) {
 		switch (o) {
+		case 'c':
+			cookie = optarg;
+			break;
+
 		case 'h':
 			help_print(stdout, pname);
 			return EXIT_SUCCESS;
@@ -148,37 +183,73 @@ int main(int argc, char *argv[])
 
 	ndm_log_set_debug(verbose);
 
-	if ((c = Coala(1234, htonl(INADDR_ANY))) == NULL) {
+	if ((fd = sock_init(port)) < 0)
 		return EXIT_FAILURE;
-	} else if ((m = CoAPMessage(type, code, id_set ? id : -1)) == NULL ||
-		   CoAPMessage_SetUri(m, uri, 0) < 0) {
-		Coala_Free(c);
+
+	if ((c = Coala(NULL, 0, Coala_FlagWellKnownResource)) == NULL)
 		return EXIT_FAILURE;
-	} else if (pay && CoAPMessage_SetPayload(m, pay, pay_size) < 0) {
-		free(pay);
+
+	if ((m = CoAPMessage(type, code, id_set ? id : -1, 0)) == NULL ||
+	    CoAPMessage_SetUri(m, uri, 0) < 0) {
+		CoAPMessage_Free(m);
 		Coala_Free(c);
 		return EXIT_FAILURE;
 	}
 
-	uint8_t key[] = {0x6e, 0xde, 0x42, 0xf0, 0x22, 0x52, 0xf3, 0x66,
-			 0x9a, 0x52, 0x12, 0xdb, 0xea, 0xb9, 0xca, 0xaf,
-			 0x01, 0xaa, 0x90, 0x5a, 0x61, 0xf2, 0xf0, 0x4a,
-			 0x91, 0x6f, 0x03, 0x93, 0x4b, 0xa8, 0xeb, 0x0d};
-	Coala_SetPrivateKey(c, key, sizeof key);
+	if (cookie &&
+	    CoAPMessage_AddOptionString(m, CoAPMessage_OptionCodeCookie,
+					cookie) < 0) {
+		CoAPMessage_Free(m);
+		Coala_Free(c);
+		return EXIT_FAILURE;
+	}
+
+	if (pay && CoAPMessage_SetPayload(m, pay, pay_size) < 0) {
+		free(pay);
+		CoAPMessage_Free(m);
+		Coala_Free(c);
+		return EXIT_FAILURE;
+	}
 
 	free(pay);
 
 	if (tok_set)
 		CoAPMessage_SetToken(m, tok, l);
 
-	CoAPMessage_SetHandler(m, handler);
+	CoAPMessage_SetCb(m, cb, NULL);
+	Coala_Send(c, fd, m);
+	CoAPMessage_Free(m);
 
-	Coala_Send(c, m);
+	struct pollfd pfds[] = {
+		{
+			.fd = STDIN_FILENO,
+			.events = POLLIN
+		}, {
+			.fd = fd,
+			.events = POLLIN
+		}
+	};
 
-	getchar();
+	while (1) {
+		int ret = poll(pfds, NDM_ARRAY_SIZE(pfds), POLL_TIMEOUT);
 
-	CoAPMessage_Decref(m);
+		if (ret < 0)
+			goto out;
+
+		if (!ret) {
+			Coala_Tick(c);
+			continue;
+		}
+
+		if (pfds[0].revents & POLLIN)
+			break;
+
+		if (pfds[1].revents & POLLIN)
+			Coala_Recv(c, fd);
+	}
+
+	res = EXIT_SUCCESS;
+out:
 	Coala_Free(c);
-
-	return EXIT_SUCCESS;
+	return res;
 }

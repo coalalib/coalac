@@ -1,3 +1,4 @@
+#include <ndm/macro.h>
 #include <errno.h>
 #include <stdarg.h>
 #include <stddef.h>
@@ -125,29 +126,29 @@ static void test_uri_parse_path(void **state)
 {
 	const char *a[] = {"a", "b", "c", "d e", "f", "g"};
 	int ret;
-	struct Uri_ParsePathEntry *e;
-	struct Uri_ParsePathHead h = STAILQ_HEAD_INITIALIZER(h);
+	struct Uri_PathEntry *e;
+	struct Uri_PathHead h = STAILQ_HEAD_INITIALIZER(h);
 	size_t n;
 
-	ret = Uri_ParsePath(&h, "/a/b/c/d%20e/f/g");
+	ret = Uri_PathParse("/a/b/c/d%20e/f/g", &h);
 	assert_int_equal(0, ret);
 
 	n = 0;
 	STAILQ_FOREACH(e, &h, list) {
-		assert_non_null(e->s);
-		assert_string_equal(a[n], e->s);
+		assert_non_null(e->val);
+		assert_string_equal(a[n], e->val);
 		n++;
 	}
-	assert_int_equal(6, n);
+	assert_int_equal(NDM_ARRAY_SIZE(a), n);
 
-	Uri_ParsePathFree(&h);
+	Uri_PathHeadFree(&h);
 }
 
-static void test_uri_parse_query_keyvalue(void **state)
+static void test_uri_parse_query_keyval(void **state)
 {
 	int ret;
-	struct Uri_ParseQueryEntry *e;
-	struct Uri_ParseQueryHead h = STAILQ_HEAD_INITIALIZER(h);
+	struct Uri_QueryEntry *e;
+	struct Uri_QueryHead h = STAILQ_HEAD_INITIALIZER(h);
 	size_t n;
 	struct {
 		const char *k;
@@ -155,53 +156,69 @@ static void test_uri_parse_query_keyvalue(void **state)
 	} a[] = {
 		{"login", "admin"},
 		{"some_param", NULL},
-		{"pass", "super pass"}
+		{"pass", "super pass"},
+		{"key", "val&"}
 	};
 
-	ret = Uri_ParseQuery(&h, "?login=admin&some_param&pass=super%20pass",
-			     true);
+	ret = Uri_QueryParse("?login=admin&some_param"
+			     "&pass=super%20pass"
+			     "&key=val%26",
+			     &h, true);
 	assert_int_equal(0, ret);
 
 	n = 0;
 	STAILQ_FOREACH(e, &h, list) {
 		assert_non_null(e->key);
-		assert_string_equal(a[n].k, e->key);
 
-		if (a[n].v == NULL) {
-			assert_null(e->value);
-		} else {
-			assert_non_null(e->value);
-			assert_string_equal(a[n].v, e->value);
+		if (n < NDM_ARRAY_SIZE(a)) {
+			assert_string_equal(a[n].k, e->key);
+
+			if (a[n].v == NULL) {
+				assert_null(e->val);
+			} else {
+				assert_non_null(e->val);
+				assert_string_equal(a[n].v, e->val);
+			}
 		}
 		n++;
 	}
-	assert_int_equal(3, n);
+	assert_int_equal(NDM_ARRAY_SIZE(a), n);
 
-	Uri_ParseQueryFree(&h);
+	Uri_QueryHeadFree(&h);
 }
 
-static void test_uri_parse_query_wo_keyvalue(void **state)
+static void test_uri_parse_query_wo_keyval(void **state)
 {
-	const char *a[] = {"login=admin", "some_param", "pass=super pass"};
+	const char *a[] = {
+		"login=admin",
+		"some_param",
+		"pass=super pass",
+		"key=val&"
+	};
 	int ret;
-	struct Uri_ParseQueryEntry *e;
-	struct Uri_ParseQueryHead h = STAILQ_HEAD_INITIALIZER(h);
+	struct Uri_QueryEntry *e;
+	struct Uri_QueryHead h = STAILQ_HEAD_INITIALIZER(h);
 	size_t n;
 
-	ret = Uri_ParseQuery(&h, "?login=admin&some_param&pass=super%20pass",
-			     false);
+	ret = Uri_QueryParse("?login=admin"
+			     "&some_param"
+			     "&pass=super%20pass"
+			     "&key=val%26",
+			     &h, false);
 	assert_int_equal(0, ret);
 
 	n = 0;
 	STAILQ_FOREACH(e, &h, list) {
-		assert_non_null(e->key);
-		assert_null(e->value);
-		assert_string_equal(a[n], e->key);
+		if (n < NDM_ARRAY_SIZE(a)) {
+			assert_non_null(e->key);
+			assert_null(e->val);
+			assert_string_equal(a[n], e->key);
+		}
 		n++;
 	}
-	assert_int_equal(3, n);
+	assert_int_equal(NDM_ARRAY_SIZE(a), n);
 
-	Uri_ParseQueryFree(&h);
+	Uri_QueryHeadFree(&h);
 }
 
 static const char *uri_data_decoded =
@@ -225,10 +242,14 @@ static void test_uri_encode_str(void **state)
 {
 	char *r;
 
-	r = Uri_EncodeStr(uri_data_decoded);
+	r = Uri_StrEncode(uri_data_decoded);
 	assert_non_null(r);
 	assert_string_equal(uri_data_encoded, r);
+	free(r);
 
+	r = Uri_StrEncode("");
+	assert_non_null(r);
+	assert_string_equal("", r);
 	free(r);
 }
 
@@ -236,10 +257,22 @@ static void test_uri_decode_str(void **state)
 {
 	char *r;
 
-	r = Uri_DecodeStr(uri_data_encoded);
+	r = Uri_StrDecode("12%", 0);
+	assert_null(r);
+	assert_int_equal(EBADMSG, errno);
+
+	r = Uri_StrDecode("12%1", 0);
+	assert_null(r);
+	assert_int_equal(EBADMSG, errno);
+
+	r = Uri_StrDecode("12%", 2);
+	assert_non_null(r);
+	assert_string_equal("12", r);
+	free(r);
+
+	r = Uri_StrDecode(uri_data_encoded, 0);
 	assert_non_null(r);
 	assert_string_equal(uri_data_decoded, r);
-
 	free(r);
 }
 
@@ -303,31 +336,64 @@ static void test_uri_encode_path(void **state)
 {
 	char *s;
 
-	s = Uri_EncodePath(NULL);
+	/* 1 */
+	s = Uri_PathGen(NULL);
 	assert_null(s);
 	assert_int_equal(EINVAL, errno);
 
-	s = Uri_EncodePath("");
-	assert_null(s);
-	assert_int_equal(EINVAL, errno);
+	/* 2 */
+	struct Uri_PathHead h = STAILQ_HEAD_INITIALIZER(h);
+	struct Uri_PathEntry *e;
 
-	s = Uri_EncodePath("a/b");
-	assert_null(s);
-	assert_int_equal(EINVAL, errno);
+	e = Uri_PathEntry("a");
+	assert_non_null(e);
+	STAILQ_INSERT_TAIL(&h, e, list);
 
-	s = Uri_EncodePath("/a/b");
+	e = Uri_PathEntry("b");
+	assert_non_null(e);
+	STAILQ_INSERT_TAIL(&h, e, list);
+
+	e = Uri_PathEntry("c d/");
+	assert_non_null(e);
+	STAILQ_INSERT_TAIL(&h, e, list);
+
+	s = Uri_PathGen(&h);
 	assert_non_null(s);
-	assert_string_equal("/a/b", s);
+	assert_string_equal("/a/b/c+d%2F", s);
+
+	Uri_PathHeadFree(&h);
 	free(s);
 
-	s = Uri_EncodePath("/a/b/");
-	assert_non_null(s);
-	assert_string_equal("/a/b", s);
-	free(s);
+	/* 3 */
+	e = Uri_PathEntry("one");
+	assert_non_null(e);
+	STAILQ_INSERT_TAIL(&h, e, list);
 
-	s = Uri_EncodePath("/a/b d/");
+	e = Uri_PathEntry("");
+	assert_non_null(e);
+	STAILQ_INSERT_TAIL(&h, e, list);
+
+	e = Uri_PathEntry("/");
+	assert_non_null(e);
+	STAILQ_INSERT_TAIL(&h, e, list);
+
+	e = Uri_PathEntry("two");
+	assert_non_null(e);
+	STAILQ_INSERT_TAIL(&h, e, list);
+
+	e = Uri_PathEntry("");
+	assert_non_null(e);
+	STAILQ_INSERT_TAIL(&h, e, list);
+
+	e = Uri_PathEntry("");
+	assert_non_null(e);
+	STAILQ_INSERT_TAIL(&h, e, list);
+
+	s = Uri_PathGen(&h);
 	assert_non_null(s);
-	assert_string_equal("/a/b+d", s);
+	assert_string_equal("/one//%2F/two//", s);
+
+	Uri_PathHeadFree(&h);
 	free(s);
 }
 
@@ -335,41 +401,42 @@ static void test_uri_encode_query(void **state)
 {
 	char *s;
 
-	s = Uri_EncodeQuery(NULL, false);
+	s = Uri_QueryGen(NULL);
 	assert_null(s);
 	assert_int_equal(EINVAL, errno);
 
-	s = Uri_EncodeQuery("", false);
-	assert_null(s);
-	assert_int_equal(EINVAL, errno);
+	struct Uri_QueryHead h = STAILQ_HEAD_INITIALIZER(h);
+	struct Uri_QueryEntry *e;
 
-	s = Uri_EncodeQuery("a=b", false);
-	assert_null(s);
-	assert_int_equal(EINVAL, errno);
+	e = Uri_QueryEntry("a", "b");
+	assert_non_null(e);
+	STAILQ_INSERT_TAIL(&h, e, list);
 
-	s = Uri_EncodeQuery("?a=b&c=d&e", false);
+	e = Uri_QueryEntry("c", "d");
+	assert_non_null(e);
+	STAILQ_INSERT_TAIL(&h, e, list);
+
+	e = Uri_QueryEntry("e", NULL);
+	assert_non_null(e);
+	STAILQ_INSERT_TAIL(&h, e, list);
+
+	e = Uri_QueryEntry("f", "g h");
+	assert_non_null(e);
+	STAILQ_INSERT_TAIL(&h, e, list);
+
+	e = Uri_QueryEntry("i jk&", NULL);
+	assert_non_null(e);
+	STAILQ_INSERT_TAIL(&h, e, list);
+
+	e = Uri_QueryEntry("l", NULL);
+	assert_non_null(e);
+	STAILQ_INSERT_TAIL(&h, e, list);
+
+	s = Uri_QueryGen(&h);
 	assert_non_null(s);
-	assert_string_equal("?a%3Db&c%3Dd&e", s);
-	free(s);
+	assert_string_equal("?a=b&c=d&e&f=g+h&i+jk%26&l", s);
 
-	s = Uri_EncodeQuery("?a=b&c=d&e&", false);
-	assert_non_null(s);
-	assert_string_equal("?a%3Db&c%3Dd&e", s);
-	free(s);
-
-	s = Uri_EncodeQuery("?a=b&c=d&e", true);
-	assert_non_null(s);
-	assert_string_equal("?a=b&c=d&e", s);
-	free(s);
-
-	s = Uri_EncodeQuery("?a=b&c=d&e&", true);
-	assert_non_null(s);
-	assert_string_equal("?a=b&c=d&e", s);
-	free(s);
-
-	s = Uri_EncodeQuery("?a=b d", true);
-	assert_non_null(s);
-	assert_string_equal("?a=b+d", s);
+	Uri_QueryHeadFree(&h);
 	free(s);
 }
 
@@ -378,8 +445,8 @@ int main(int argc, char *argv[])
 	struct CMUnitTest tests[] = {
 		cmocka_unit_test(test_uri_parse),
 		cmocka_unit_test(test_uri_parse_path),
-		cmocka_unit_test(test_uri_parse_query_keyvalue),
-		cmocka_unit_test(test_uri_parse_query_wo_keyvalue),
+		cmocka_unit_test(test_uri_parse_query_keyval),
+		cmocka_unit_test(test_uri_parse_query_wo_keyval),
 		cmocka_unit_test(test_uri_encode_str),
 		cmocka_unit_test(test_uri_decode_str),
 		cmocka_unit_test(test_uri_gen),

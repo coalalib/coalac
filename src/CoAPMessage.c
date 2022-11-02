@@ -1,3 +1,5 @@
+#define _GNU_SOURCE	/* vasprintf */
+
 #include <arpa/inet.h>
 #include <ndm/macro.h>
 #include <sys/socket.h>
@@ -7,16 +9,16 @@
 #include <netdb.h>
 #include <stdarg.h>
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include <coala/Buf.h>
 #include <coala/CoAPMessage.h>
-#include <coala/Mem.h>
+#include <coala/Str.h>
 #include <coala/Uri.h>
 #include <ndm/ip_sockaddr.h>
 
-#include "Str.h"
 
 struct CoAPMessage {
 	uint8_t type;					/* 2 bits */
@@ -25,14 +27,15 @@ struct CoAPMessage {
 	struct ndm_ip_sockaddr_t sa;
 	uint8_t *payload;
 	size_t payload_len;
-	void *handler;
 	struct CoAPMessage_OptionHead options_head;
 	uint8_t token[COAP_MESSAGE_MAX_TOKEN_SIZE];	/* 0-8 bytes */
 	uint8_t token_len;
-	uint8_t refcount;
+	CoAPMessage_Cb_t cb;
+	void *arg;
+	unsigned flags;
 };
 
-static volatile uint16_t message_id_counter;
+static uint16_t message_id_counter;
 
 void CoAPMessage_Init(void)
 {
@@ -44,26 +47,39 @@ void CoAPMessage_Init(void)
  */
 struct CoAPMessage *CoAPMessage(enum CoAPMessage_Type type,
 				enum CoAPMessage_Code code,
-				int id)
+				int id,
+				unsigned flags)
 {
 	struct CoAPMessage *m;
 
-	m = Mem_calloc(1, sizeof *m);
+	m = calloc(1, sizeof *m);
 	if (m == NULL)
 		return NULL;
 
 	m->type = type;
 	m->code = code;
-	m->refcount = 1;
 
 	TAILQ_INIT(&m->options_head);
 
 	m->id = (id == -1) ? CoAPMessage_GenId() : id;
 
+	if (flags & CoAPMessage_FlagGenToken) {
+		uint8_t t[COAP_MESSAGE_MAX_TOKEN_SIZE];
+
+		if (CoAPMessage_GenToken(t, sizeof t) < 0 ||
+		    CoAPMessage_SetToken(m, t, sizeof t) < 0) {
+			int errsv = errno;
+			CoAPMessage_Free(m);
+			errno = errsv;
+
+			m = NULL;
+		}
+	}
+
 	return m;
 }
 
-struct CoAPMessage *CoAPMessage_Clone(struct CoAPMessage *m, bool payload)
+struct CoAPMessage *CoAPMessage_Clone(struct CoAPMessage *m, unsigned flags)
 {
 	int errsv = 0;
 	size_t s;
@@ -76,7 +92,7 @@ struct CoAPMessage *CoAPMessage_Clone(struct CoAPMessage *m, bool payload)
 		goto out;
 	}
 
-	if ((cp = CoAPMessage(m->type, m->code, m->id)) == NULL) {
+	if ((cp = CoAPMessage(m->type, m->code, m->id, 0)) == NULL) {
 		errsv = errno;
 		goto out;
 	}
@@ -86,6 +102,7 @@ struct CoAPMessage *CoAPMessage_Clone(struct CoAPMessage *m, bool payload)
 		cp->token_len = m->token_len;
 	}
 
+	cp->flags = m->flags;
 	cp->sa = m->sa;
 
 	TAILQ_FOREACH(o, &m->options_head, list) {
@@ -93,23 +110,29 @@ struct CoAPMessage *CoAPMessage_Clone(struct CoAPMessage *m, bool payload)
 
 		if ((d = CoAPMessage_OptionDup(o)) == NULL) {
 			errsv = errno;
-			goto out_decref;
+			goto out_free;
 		}
 
 		TAILQ_INSERT_TAIL(&cp->options_head, d, list);
 	}
 
-	if (payload && (d = CoAPMessage_GetPayload(m, &s, 0))) {
+	if (flags & CoAPMessage_CloneFlagPayload &&
+	    (d = CoAPMessage_GetPayload(m, &s, 0))) {
 		if (CoAPMessage_SetPayload(cp, d, s) < 0) {
 			errsv = errno;
-			goto out_decref;
+			goto out_free;
 		}
+	}
+
+	if (flags & CoAPMessage_CloneFlagCb) {
+		cp->arg = m->arg;
+		cp->cb = m->cb;
 	}
 
 	goto out;
 
-out_decref:
-	CoAPMessage_Decref(cp);
+out_free:
+	CoAPMessage_Free(cp);
 	cp = NULL;
 out:
 	if (errsv)
@@ -118,37 +141,21 @@ out:
 	return cp;
 }
 
-/*
- * Уменьшает число ссылок на сообщение.
- */
-void CoAPMessage_Decref(struct CoAPMessage *m)
+void CoAPMessage_Free(struct CoAPMessage *m)
 {
 	struct CoAPMessage_Option *o, *t;
 
 	if (m == NULL)
 		return;
 
-	if (--m->refcount == 0) {
-		Mem_free(m->payload);
+	free(m->payload);
 
-		TAILQ_FOREACH_SAFE(o, &m->options_head, list, t) {
-			TAILQ_REMOVE(&m->options_head, o, list);
-			CoAPMessage_OptionFree(o);
-		}
-
-		Mem_free(m);
+	TAILQ_FOREACH_SAFE(o, &m->options_head, list, t) {
+		TAILQ_REMOVE(&m->options_head, o, list);
+		CoAPMessage_OptionFree(o);
 	}
-}
 
-/*
- * Увеличивает количество ссылок на сообщение.
- */
-struct CoAPMessage *CoAPMessage_Incref(struct CoAPMessage *m)
-{
-	if (m)
-		m->refcount++;
-
-	return m;
+	free(m);
 }
 
 uint16_t CoAPMessage_GenId(void)
@@ -263,14 +270,14 @@ uint8_t *CoAPMessage_GetPayload(struct CoAPMessage *m, size_t *size,
 		return NULL;
 	}
 
-	if (flags & CoAPMessage_GetPayload_Alloc) {
-		bool zero = flags & CoAPMessage_GetPayload_Zero;
+	if (flags & CoAPMessage_GetPayloadFlagAlloc) {
+		bool zero = flags & CoAPMessage_GetPayloadFlagZero;
 		size_t s = m->payload_len;
 
 		if (zero)
 			s++;
 
-		if ((p = Mem_malloc(s)) == NULL)
+		if ((p = malloc(s)) == NULL)
 			return NULL;
 
 		memcpy(p, m->payload, m->payload_len);
@@ -299,18 +306,28 @@ int CoAPMessage_SetPayload(struct CoAPMessage *m, const uint8_t *payload,
 	}
 
 	if (payload) {
-		if ((p = Mem_malloc(size)) == NULL)
+		if ((p = malloc(size)) == NULL)
 			return -1;
 
 		memcpy(p, payload, size);
 	}
 
-	Mem_free(m->payload);
+	free(m->payload);
 
 	m->payload = p;
 	m->payload_len = size;
 
 	return 0;
+}
+
+int CoAPMessage_SetPayloadString(struct CoAPMessage *m, const char *s)
+{
+	if (s == NULL || *s == '\0') {
+		errno = EINVAL;
+		return -1;
+	}
+
+	return CoAPMessage_SetPayload(m, (const uint8_t *)s, strlen(s));
 }
 
 int CoAPMessage_GenToken(uint8_t *token, size_t size)
@@ -358,6 +375,7 @@ int CoAPMessage_GetToken(struct CoAPMessage *m, uint8_t *token, size_t *size)
 	}
 
 	if (!m->token_len) {
+		*size = 0;
 		errno = ENODATA;
 		return -1;
 	}
@@ -396,6 +414,7 @@ static inline bool OptionCodeIsRepeatable(enum CoAPMessage_OptionCode code)
 	case CoAPMessage_OptionCodeLocationQuery:
 	case CoAPMessage_OptionCodeIfMatch:
 	case CoAPMessage_OptionCodeEtag:
+	case CoAPMessage_OptionCodeCookie:
 		return true;
 	default:
 		return false;
@@ -466,7 +485,12 @@ struct CoAPMessage_Option *CoAPMessage_Option(enum CoAPMessage_OptionCode code,
 	struct CoAPMessage_Option *o = NULL;
 	uint8_t *v;
 
-	o = Mem_calloc(1, sizeof(*o));
+	if (value == NULL && value_len) {
+		errno = EINVAL;
+		return NULL;
+	}
+
+	o = calloc(1, sizeof(*o));
 	if (o == NULL) {
 		errsv = errno;
 		goto out;
@@ -475,7 +499,7 @@ struct CoAPMessage_Option *CoAPMessage_Option(enum CoAPMessage_OptionCode code,
 	o->code = code;
 
 	if (value_len) {
-		v = Mem_malloc(value_len);
+		v = malloc(value_len);
 		if (v == NULL) {
 			errsv = errno;
 			goto out_free;
@@ -489,7 +513,7 @@ struct CoAPMessage_Option *CoAPMessage_Option(enum CoAPMessage_OptionCode code,
 	goto out;
 
 out_free:
-	Mem_free(o);
+	free(o);
 	o = NULL;
 out:
 	if (errsv)
@@ -513,8 +537,8 @@ void CoAPMessage_OptionFree(struct CoAPMessage_Option *o)
 	if (o == NULL)
 		return;
 
-	Mem_free(o->value);
-	Mem_free(o);
+	free(o->value);
+	free(o);
 }
 
 /*
@@ -564,8 +588,8 @@ int CoAPMessage_RemoveOptions(struct CoAPMessage *m,
 			continue;
 
 		TAILQ_REMOVE(&m->options_head, o, list);
-		Mem_free(o->value);
-		Mem_free(o);
+		free(o->value);
+		free(o);
 
 		deleted = true;
 	}
@@ -877,7 +901,7 @@ struct CoAPMessage *CoAPMessage_FromBytes(uint8_t *b, size_t size)
 	code = b[1];
 	id = ntohs(*(uint16_t *)&b[2]);
 
-	m = CoAPMessage(type, code, id);
+	m = CoAPMessage(type, code, id, 0);
 	if (m == NULL) {
 		/* errno from CoAPMessage */
 		return NULL;
@@ -889,7 +913,7 @@ struct CoAPMessage *CoAPMessage_FromBytes(uint8_t *b, size_t size)
 	/* Token */
 	if (token_len) {
 		if (size < token_len) {
-			CoAPMessage_Decref(m);
+			CoAPMessage_Free(m);
 			errno = EBADMSG;
 			return NULL;
 		}
@@ -919,7 +943,7 @@ struct CoAPMessage *CoAPMessage_FromBytes(uint8_t *b, size_t size)
 				 * zero-length payload MUST be processed as a
 				 * message format error.
 				 */
-				CoAPMessage_Decref(m);
+				CoAPMessage_Free(m);
 				errno = EBADMSG;
 				return NULL;
 			}
@@ -939,7 +963,7 @@ struct CoAPMessage *CoAPMessage_FromBytes(uint8_t *b, size_t size)
 			 * byte is not the payload marker, this MUST be
 			 * processed as a message format error.
 			 */
-			CoAPMessage_Decref(m);
+			CoAPMessage_Free(m);
 			errno = EBADMSG;
 			return NULL;
 		}
@@ -949,7 +973,7 @@ struct CoAPMessage *CoAPMessage_FromBytes(uint8_t *b, size_t size)
 			code += delta;
 		} else if (delta == 13) {
 			if (size < sizeof(uint8_t)) {
-				CoAPMessage_Decref(m);
+				CoAPMessage_Free(m);
 				errno = EBADMSG;
 				return NULL;
 			}
@@ -960,7 +984,7 @@ struct CoAPMessage *CoAPMessage_FromBytes(uint8_t *b, size_t size)
 			b += sizeof(uint8_t);
 		} else if (delta == 14) {
 			if (size < sizeof(uint16_t)) {
-				CoAPMessage_Decref(m);
+				CoAPMessage_Free(m);
 				errno = EBADMSG;
 				return NULL;
 			}
@@ -976,7 +1000,7 @@ struct CoAPMessage *CoAPMessage_FromBytes(uint8_t *b, size_t size)
 			;
 		} else if (length == 13) {
 			if (size < sizeof(uint8_t)) {
-				CoAPMessage_Decref(m);
+				CoAPMessage_Free(m);
 				errno = EBADMSG;
 				return NULL;
 			}
@@ -987,7 +1011,7 @@ struct CoAPMessage *CoAPMessage_FromBytes(uint8_t *b, size_t size)
 			b += sizeof(uint8_t);
 		} else if (length == 14) {
 			if (size < sizeof(uint16_t)) {
-				CoAPMessage_Decref(m);
+				CoAPMessage_Free(m);
 				errno = EBADMSG;
 				return NULL;
 			}
@@ -1005,7 +1029,7 @@ struct CoAPMessage *CoAPMessage_FromBytes(uint8_t *b, size_t size)
 
 		if (CoAPMessage_AddOptionOpaque(m, code, b, length) < 0) {
 			/* errno from CoAPMessage_AddOption */
-			CoAPMessage_Decref(m);
+			CoAPMessage_Free(m);
 			return NULL;
 		}
 
@@ -1016,7 +1040,7 @@ struct CoAPMessage *CoAPMessage_FromBytes(uint8_t *b, size_t size)
 	if (size) {
 		if (CoAPMessage_SetPayload(m, b, size) < 0) {
 			/* errno from CoAPMessage_SetPayload */
-			CoAPMessage_Decref(m);
+			CoAPMessage_Free(m);
 			m = NULL;
 		}
 	}
@@ -1027,10 +1051,10 @@ struct CoAPMessage *CoAPMessage_FromBytes(uint8_t *b, size_t size)
 /*
  * Сравнивает два сообщения.
  */
-int CoAPMessage_Equals(struct CoAPMessage *m1, struct CoAPMessage *m2)
+int CoAPMessage_Equals(struct CoAPMessage *m1, struct CoAPMessage *m2,
+		       unsigned flags)
 {
 	int res = -1;
-	size_t s1, s2;
 	uint8_t *d1 = NULL, *d2 = NULL;
 
 	if (m1 == NULL || m2 == NULL) {
@@ -1038,23 +1062,54 @@ int CoAPMessage_Equals(struct CoAPMessage *m1, struct CoAPMessage *m2)
 		goto out;
 	}
 
-	if (!ndm_ip_sockaddr_is_equal(&m1->sa, &m2->sa)) {
+	if (!flags) {
+		size_t s1, s2;
+
+		if (!ndm_ip_sockaddr_is_equal(&m1->sa, &m2->sa)) {
+			res = 0;
+			goto out;
+		}
+
+		if ((d1 = CoAPMessage_ToBytes(m1, &s1)) == NULL ||
+		    (d2 = CoAPMessage_ToBytes(m2, &s2)) == NULL ) {
+			/* errno from the func above */
+			goto out;
+		}
+
 		res = 0;
-		goto out;
-	}
+		if (s1 == s2 && !memcmp(d1, d2, s1))
+			res = 1;
+	} else {
+		res = 0;
 
-	if ((d1 = CoAPMessage_ToBytes(m1, &s1)) == NULL ||
-	    (d2 = CoAPMessage_ToBytes(m2, &s2)) == NULL ) {
-		/* errno from the func above */
-		goto out;
-	}
+		if (flags & CoAPMessage_EqualsFlagOnlyId) {
+			if (CoAPMessage_GetId(m1) != CoAPMessage_GetId(m2))
+				goto out;
+		}
 
-	res = 0;
-	if (s1 == s2 && !memcmp(d1, d2, s1))
+		if (flags & CoAPMessage_EqualsFlagOnlyToken) {
+			size_t s1, s2;
+			uint8_t t1[COAP_MESSAGE_MAX_TOKEN_SIZE];
+			uint8_t t2[COAP_MESSAGE_MAX_TOKEN_SIZE];
+
+			s1 = sizeof t1;
+			s2 = sizeof t2;
+
+			CoAPMessage_GetToken(m1, t1, &s1);
+			CoAPMessage_GetToken(m2, t2, &s2);
+
+			if (s1 != s2)
+				goto out;
+
+			if (memcmp(t1, t2, s1))
+				goto out;
+		}
+
 		res = 1;
+	}
 out:
-	Mem_free(d1);
-	Mem_free(d2);
+	free(d1);
+	free(d2);
 	return res;
 }
 
@@ -1100,7 +1155,9 @@ int CoAPMessage_ToBuf(struct CoAPMessage *m, struct Buf_Handle *b)
 
 	/* Options */
 	TAILQ_FOREACH(o, &m->options_head, list) {
-		if (Buf_AddFormatStr(b, "Code %d: ", o->code) < 0)
+		if (Buf_AddFormatStr(b, "Option %s: ",
+				     CoAPMessage_OptionCodeStr(o->code, buf,
+							       sizeof buf)) < 0)
 			return -1;
 
 		if (!o->value_len) {
@@ -1210,7 +1267,7 @@ char *CoAPMessage_GetOptionString(struct CoAPMessage *m,
 	if (len)
 		*len = s;
 
-	return Mem_strndup((char *)d, s);
+	return strndup((char *)d, s);
 }
 
 int CoAPMessage_GetOptionUint(struct CoAPMessage *m,
@@ -1267,7 +1324,6 @@ int CoAPMessage_IterOptions(struct CoAPMessage *m,
 			    CoAPMessage_IterOptionsFunc f,
 			    void *data)
 {
-	int ret;
 	struct CoAPMessage_Option *o;
 
 	if (m == NULL || f == NULL) {
@@ -1278,8 +1334,8 @@ int CoAPMessage_IterOptions(struct CoAPMessage *m,
 	TAILQ_FOREACH(o, &m->options_head, list) {
 		bool last = TAILQ_NEXT(o, list) ==
 			    TAILQ_END(&m->options_head);
+		int ret = f(o->code, o->value, o->value_len, last, data);
 
-		ret = f(o->code, o->value, o->value_len, last, data);
 		if (ret <= CoAPMessage_IterOptionsFuncStop)
 			return ret;
 	}
@@ -1333,23 +1389,21 @@ void CoAPMessage_GetOptionsFree(struct CoAPMessage_OptionHead *h)
 	if (h == NULL)
 		return;
 
-	TAILQ_FOREACH_SAFE(o, h, list, t)
+	TAILQ_FOREACH_SAFE(o, h, list, t) {
+		TAILQ_REMOVE(h, o, list);
 		CoAPMessage_OptionFree(o);
+	}
 }
 
-char *CoAPMessage_GetUriPath(struct CoAPMessage *m, bool encode)
+char *CoAPMessage_GetUriPath(struct CoAPMessage *m)
 {
 	char *res = NULL;
 	int errsv = 0;
-	struct Buf_Handle *b = NULL;
-	struct CoAPMessage_Option *e;
 	struct CoAPMessage_OptionHead h = TAILQ_HEAD_INITIALIZER(h);
+	struct Uri_PathHead ph = STAILQ_HEAD_INITIALIZER(ph);
 
 	if (m == NULL) {
 		errsv = EINVAL;
-		goto out;
-	} else if ((b = Buf()) == NULL) {
-		errsv = errno;
 		goto out;
 	}
 
@@ -1358,33 +1412,32 @@ char *CoAPMessage_GetUriPath(struct CoAPMessage *m, bool encode)
 		goto out;
 	}
 
+	struct CoAPMessage_Option *e;
 	TAILQ_FOREACH(e, &h, list) {
-		if (Buf_AddCh(b, '/') < 0 ||
-		    Buf_Add(b, e->value, e->value_len) < 0) {
+		char *t = strndup((char *)e->value, e->value_len);
+
+		if (t == NULL) {
 			errsv = errno;
 			goto out;
 		}
-	}
 
-	if (Buf_AddCh(b, '\0') < 0) {
-		errsv = errno;
-		goto out;
-	}
-
-	if (encode) {
-		char *s = Buf_GetData(b, NULL, false);
-		if (s == NULL ||
-		    (res = Uri_EncodePath(s)) == NULL) {
+		struct Uri_PathEntry *pe = Uri_PathEntry(t);
+		if (pe == NULL) {
 			errsv = errno;
+			free(t);
 			goto out;
 		}
-	} else if ((res = Buf_GetData(b, NULL, true)) == NULL) {
-		errsv = errno;
+
+		free(t);
+		STAILQ_INSERT_TAIL(&ph, pe, list);
 	}
+
+	if ((res = Uri_PathGen(&ph)) == NULL)
+		errsv = errno;
 
 out:
 	CoAPMessage_GetOptionsFree(&h);
-	Buf_Free(b);
+	Uri_PathHeadFree(&ph);
 
 	if (errsv)
 		errno = errsv;
@@ -1392,20 +1445,15 @@ out:
 	return res;
 }
 
-char *CoAPMessage_GetUriQuery(struct CoAPMessage *m, bool encode)
+char *CoAPMessage_GetUriQuery(struct CoAPMessage *m)
 {
-	char *res = NULL, *d;
+	char *res = NULL;
 	int errsv = 0;
-	size_t s;
-	struct Buf_Handle *b = NULL;
-	struct CoAPMessage_Option *e;
 	struct CoAPMessage_OptionHead h = TAILQ_HEAD_INITIALIZER(h);
+	struct Uri_QueryHead qh = STAILQ_HEAD_INITIALIZER(qh);
 
 	if (m == NULL) {
 		errsv = EINVAL;
-		goto out;
-	} else if ((b = Buf()) == NULL) {
-		errsv = errno;
 		goto out;
 	}
 
@@ -1414,33 +1462,41 @@ char *CoAPMessage_GetUriQuery(struct CoAPMessage *m, bool encode)
 		goto out;
 	}
 
-	if (Buf_AddCh(b, '?') < 0) {
-		errsv = errno;
-		goto out;
-	}
-
+	struct CoAPMessage_Option *e;
 	TAILQ_FOREACH(e, &h, list) {
-		if (Buf_Add(b, e->value, e->value_len) < 0 ||
-		    Buf_AddCh(b, '&') < 0) {
-			errno = errsv;
+		char *t = strndup((char *)e->value, e->value_len);
+
+		if (t == NULL) {
+			errsv = errno;
 			goto out;
 		}
-	}
 
-	/* Replace the trailing '&' with zero */
-	d = Buf_GetData(b, &s, false);
-	d[s - 1] = '\0';
+		char *k = t;
+		char *v = NULL;
 
-	if (encode) {
-		if ((res = Uri_EncodeQuery(d, true)) == NULL)
+		char *p = strchr(t, '=');
+		if (p && *(p + 1) != '\0') {
+			*p = '\0';
+			v = p + 1;
+		}
+
+		struct Uri_QueryEntry *qe = Uri_QueryEntry(k, v);
+		if (qe == NULL) {
 			errsv = errno;
-	} else if ((res = Buf_GetData(b, NULL, true)) == NULL) {
-		errsv = errno;
+			free(t);
+			goto out;
+		}
+
+		free(t);
+		STAILQ_INSERT_TAIL(&qh, qe, list);
 	}
+
+	if ((res = Uri_QueryGen(&qh)) == NULL)
+		errsv = errno;
 
 out:
 	CoAPMessage_GetOptionsFree(&h);
-	Buf_Free(b);
+	Uri_QueryHeadFree(&qh);
 
 	if (errsv)
 		errno = errsv;
@@ -1451,15 +1507,15 @@ out:
 int CoAPMessage_SetUriPath(struct CoAPMessage *m, const char *path)
 {
 	int errsv = 0, res = -1;
-	struct Uri_ParsePathEntry *e;
-	struct Uri_ParsePathHead h = STAILQ_HEAD_INITIALIZER(h);
+	struct Uri_PathEntry *e;
+	struct Uri_PathHead h = STAILQ_HEAD_INITIALIZER(h);
 
 	if (m == NULL) {
 		errsv = EINVAL;
 		goto out;
 	}
 
-	if (Uri_ParsePath(&h, path) < 0) {
+	if (Uri_PathParse(path, &h) < 0) {
 		errsv = errno;
 		goto out_parse_path_free;
 	}
@@ -1470,7 +1526,7 @@ int CoAPMessage_SetUriPath(struct CoAPMessage *m, const char *path)
 		if (CoAPMessage_AddOptionString(
 					m,
 					CoAPMessage_OptionCodeUriPath,
-					e->s) < 0) {
+					e->val) < 0) {
 			errsv = errno;
 			goto out_parse_path_free;
 		}
@@ -1479,7 +1535,7 @@ int CoAPMessage_SetUriPath(struct CoAPMessage *m, const char *path)
 	res = 0;
 
 out_parse_path_free:
-	Uri_ParsePathFree(&h);
+	Uri_PathHeadFree(&h);
 out:
 	if (errsv)
 		errno = errsv;
@@ -1490,15 +1546,15 @@ out:
 int CoAPMessage_SetUriQuery(struct CoAPMessage *m, const char *query)
 {
 	int errsv = 0, res = -1;
-	struct Uri_ParseQueryEntry *e;
-	struct Uri_ParseQueryHead h = STAILQ_HEAD_INITIALIZER(h);
+	struct Uri_QueryEntry *e;
+	struct Uri_QueryHead h = STAILQ_HEAD_INITIALIZER(h);
 
 	if (m == NULL) {
 		errsv = EINVAL;
 		goto out;
 	}
 
-	if (Uri_ParseQuery(&h, query, false) < 0) {
+	if (Uri_QueryParse(query, &h, false) < 0) {
 		errsv = errno;
 		goto out_parse_query_free;
 	}
@@ -1518,7 +1574,7 @@ int CoAPMessage_SetUriQuery(struct CoAPMessage *m, const char *query)
 	res = 0;
 
 out_parse_query_free:
-	Uri_ParseQueryFree(&h);
+	Uri_QueryHeadFree(&h);
 out:
 	if (errsv)
 		errno = errsv;
@@ -1561,31 +1617,54 @@ int CoAPMessage_GetSecure(struct CoAPMessage *m, bool *on)
 	return 0;
 }
 
-int CoAPMessage_SetUri(struct CoAPMessage *m, const char *uri, unsigned flags)
+int CoAPMessage_SetUri(struct CoAPMessage *m, const char *uri,
+		       unsigned flags, ...)
 {
+	int errsv = 0;
 	int res = -1;
 	struct Uri u;
 
 	if (m == NULL || uri == NULL || *uri == '\0') {
-		errno = EINVAL;
+		errsv = EINVAL;
 		goto out;
 	}
 
-	if (!flags)
-		flags = ~0;
+	if (!(flags & CoAPMessage_SetUriFlagOnlyMask))
+		flags |= CoAPMessage_SetUriFlagOnlyMask;
 
-	if (Uri_Parse(&u, uri) < 0)
-		goto out;
+	if (flags & CoAPMessage_SetUriFlagFormat) {
+		char *s;
+		int ret;
+		va_list ap;
 
-	if (flags & CoAPMessage_SetUri_OnlySecure)
-		if (CoAPMessage_SetSecure(m, u.secure) < 0)
+		va_start(ap, flags);
+		ret = vasprintf(&s, uri, ap);
+		va_end(ap);
+
+		if (ret < 0) {
+			errsv = errno;
+			goto out;
+		}
+
+		uri = s;
+	}
+
+	if (Uri_Parse(&u, uri) < 0) {
+		errsv = errno;
+		goto out_uri_free;
+	}
+
+	if (flags & CoAPMessage_SetUriFlagOnlySecure)
+		if (CoAPMessage_SetSecure(m, u.secure) < 0) {
+			errsv = errno;
 			goto out_parse_free;
+		}
 
 	CoAPMessage_RemoveOptions(m, CoAPMessage_OptionCodeUriHost);
 
 	/* Try IPv4 */
-	if (flags & CoAPMessage_SetUri_OnlyIpPort) {
-		bool ipv4 = false, ipv6 = false;
+	if (flags & CoAPMessage_SetUriFlagOnlyIpPort) {
+		bool ipv4;
 		struct ndm_ip_sockaddr_t sa;
 		struct sockaddr_in in;
 
@@ -1600,6 +1679,7 @@ int CoAPMessage_SetUri(struct CoAPMessage *m, const char *uri, unsigned flags)
 			CoAPMessage_SetSockAddr(m, &sa);
 		} else {
 			/* Try IPv6 */
+			bool ipv6;
 			struct sockaddr_in6 in6;
 
 			memset(&in6, 0, sizeof in6);
@@ -1620,7 +1700,7 @@ int CoAPMessage_SetUri(struct CoAPMessage *m, const char *uri, unsigned flags)
 
 				ret = getaddrinfo(u.host, NULL, &hints, &res);
 				if (ret != 0) {
-					errno = EADDRNOTAVAIL;
+					errsv = EADDRNOTAVAIL;
 					goto out_parse_free;
 				}
 
@@ -1634,37 +1714,48 @@ int CoAPMessage_SetUri(struct CoAPMessage *m, const char *uri, unsigned flags)
 				if (CoAPMessage_AddOptionString(m,
 						CoAPMessage_OptionCodeUriHost,
 						u.host) < 0) {
+					errsv = errno;
 					goto out_parse_free;
 				}
 			}
 		}
 	}
 
-	if (flags & CoAPMessage_SetUri_OnlyPath) {
-		if (u.path == NULL)
+	if (flags & CoAPMessage_SetUriFlagOnlyPath) {
+		if (u.path == NULL) {
 			CoAPMessage_RemoveOptions(m,
 					CoAPMessage_OptionCodeUriPath);
-		else if (CoAPMessage_SetUriPath(m, u.path) < 0)
+		} else if (CoAPMessage_SetUriPath(m, u.path) < 0) {
+			errsv = errno;
 			goto out_parse_free;
+		}
 	}
 
-	if (flags & CoAPMessage_SetUri_OnlyQuery) {
-		if (u.query == NULL)
+	if (flags & CoAPMessage_SetUriFlagOnlyQuery) {
+		if (u.query == NULL) {
 			CoAPMessage_RemoveOptions(m,
 					CoAPMessage_OptionCodeUriQuery);
-		else if (CoAPMessage_SetUriQuery(m, u.query) < 0)
+		} else if (CoAPMessage_SetUriQuery(m, u.query) < 0) {
+			errsv = errno;
 			goto out_parse_free;
+		}
 	}
 
 	res = 0;
 
 out_parse_free:
 	Uri_ParseFree(&u);
+out_uri_free:
+	if (flags & CoAPMessage_SetUriFlagFormat)
+		free((char *)uri);
 out:
+	if (errsv)
+		errno = errsv;
+
 	return res;
 }
 
-char *CoAPMessage_GetUri(struct CoAPMessage *m, bool encode)
+char *CoAPMessage_GetUri(struct CoAPMessage *m)
 {
 	char *res = NULL, *s;
 	int errsv = 0;
@@ -1676,14 +1767,14 @@ char *CoAPMessage_GetUri(struct CoAPMessage *m, bool encode)
 		goto out;
 	}
 
-	if ((s = CoAPMessage_GetUriPath(m, encode)) == NULL &&
+	if ((s = CoAPMessage_GetUriPath(m)) == NULL &&
 	    errno != ENOENT) {
 		errsv = errno;
 		goto out;
 	}
 	u.path = s;
 
-	if ((s = CoAPMessage_GetUriQuery(m, encode)) == NULL &&
+	if ((s = CoAPMessage_GetUriQuery(m)) == NULL &&
 	    errno != ENOENT) {
 		errsv = errno;
 		goto out;
@@ -1707,14 +1798,14 @@ char *CoAPMessage_GetUri(struct CoAPMessage *m, bool encode)
 
 	char a[NDM_IP_SOCKADDR_LEN];
 	if (ndm_ip_sockaddr_ntop(&sa, a, sizeof a) == NULL ||
-	    (u.host = Mem_strdup(a)) == NULL) {
+	    (u.host = strdup(a)) == NULL) {
 		errsv = errno;
 		goto out;
 	}
 
 	if ((s = CoAPMessage_GetOptionString(m, CoAPMessage_OptionCodeUriHost,
 					     NULL))) {
-		Mem_free(u.host);
+		free(u.host);
 		u.host = s;
 	} else if (errno != ENOENT) {
 		errsv = errno;
@@ -1730,9 +1821,9 @@ char *CoAPMessage_GetUri(struct CoAPMessage *m, bool encode)
 		errsv = errno;
 
 out:
-	Mem_free(u.host);
-	Mem_free(u.path);
-	Mem_free(u.query);
+	free(u.host);
+	free(u.path);
+	free(u.query);
 
 	if (errsv)
 		errno = errsv;
@@ -1895,6 +1986,12 @@ static struct {
 		CoAPMessage_OptionCodeSelectiveRepeatWindowSize,
 		"Selective-Repeat-Window-Size"
 	}, {
+		CoAPMessage_OptionCodeProxySecurityId,
+		"Proxy-Security-Id"
+	}, {
+		CoAPMessage_OptionCodeCookie,
+		"Cookie"
+	}, {
 		CoAPMessage_OptionCodeHandshakeType,
 		"Handshake-Type"
 	}, {
@@ -1922,31 +2019,6 @@ char *CoAPMessage_OptionCodeStr(enum CoAPMessage_OptionCode code, char *buf,
 
 	snprintf(buf, size, "0x%x", (unsigned)code);
 	return buf;
-}
-
-int CoAPMessage_SetHandler(struct CoAPMessage *m, CoAPMessage_Handler_t h)
-{
-	if (m == NULL) {
-		errno = EINVAL;
-		return -1;
-	}
-
-	m->handler = h;
-
-	return 0;
-}
-
-CoAPMessage_Handler_t CoAPMessage_GetHandler(struct CoAPMessage *m)
-{
-	if (m == NULL) {
-		errno = EINVAL;
-		return NULL;
-	}
-
-	if (m->handler == NULL)
-		errno = ENODATA;
-
-	return m->handler;
 }
 
 static struct {
@@ -2063,7 +2135,9 @@ char *CoAPMessage_CodeStr(enum CoAPMessage_Code code, char *buf, size_t size,
 		}
 	}
 
-	snprintf(code_s, sizeof code_s, "%u.%02u", code >> 5, code & 0x1f);
+	snprintf(code_s, sizeof code_s, "%u.%02u",
+		 (unsigned)code >> 5 & 0x7,
+		 (unsigned)code & 0x1f);
 
 	if (s == NULL) {
 		strncpy(buf, code_s, size - 1);
@@ -2086,4 +2160,86 @@ bool CoAPMessage_IsMulticast(struct CoAPMessage *m)
 		return false;
 
 	return IN_MULTICAST(ntohl(sa.un.in.sin_addr.s_addr));
+}
+
+int CoAPMessage_SetProxySecurityId(struct CoAPMessage *m, uint32_t v)
+{
+	enum CoAPMessage_OptionCode c = CoAPMessage_OptionCodeProxySecurityId;
+	if (m == NULL) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	CoAPMessage_RemoveOptions(m, c);
+
+	return CoAPMessage_AddOptionUint(m, c, v);
+}
+
+int CoAPMessage_GetProxySecurityId(struct CoAPMessage *m, uint32_t *v)
+{
+	enum CoAPMessage_OptionCode c = CoAPMessage_OptionCodeProxySecurityId;
+
+	if (m == NULL || v == NULL) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	return CoAPMessage_GetOptionUint(m, c, v);
+}
+
+int CoAPMessage_GetCb(struct CoAPMessage *m, CoAPMessage_Cb_t *cb, void **arg)
+{
+	if (m == NULL) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	if (arg)
+		*arg = m->arg;
+	if (cb)
+		*cb = m->cb;
+
+	return 0;
+}
+
+int CoAPMessage_SetCb(struct CoAPMessage *m, CoAPMessage_Cb_t cb, void *arg)
+{
+	if (m == NULL) {
+		errno = EINVAL;
+		return -1;
+	}
+
+	m->arg = arg;
+	m->cb = cb;
+
+	return 0;
+}
+
+int CoAPMessage_CopyCb(struct CoAPMessage *d, struct CoAPMessage *s)
+{
+	if (d == NULL || s == NULL)
+	{
+		errno = EINVAL;
+		return -1;
+	}
+
+	d->arg = s->arg;
+	d->cb = s->cb;
+
+	return 0;
+}
+
+bool CoAPMessage_TestFlag(struct CoAPMessage *m, unsigned nr)
+{
+	return m->flags & (1ul << nr);
+}
+
+void CoAPMessage_SetFlag(struct CoAPMessage *m, unsigned nr)
+{
+	m->flags |= (1ul << nr);
+}
+
+void CoAPMessage_ClearFlag(struct CoAPMessage *m, unsigned nr)
+{
+	m->flags &= ~(1ul << nr);
 }

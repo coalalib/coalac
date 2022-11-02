@@ -88,6 +88,8 @@ enum CoAPMessage_OptionCode {
 	CoAPMessage_OptionCodeSize1			= 60,
 	CoAPMessage_OptionCodeUriScheme			= 2111,
 	CoAPMessage_OptionCodeSelectiveRepeatWindowSize	= 3001,
+	CoAPMessage_OptionCodeProxySecurityId		= 3004,
+	CoAPMessage_OptionCodeCookie			= 3036,
 	CoAPMessage_OptionCodeHandshakeType		= 3999,
 	CoAPMessage_OptionCodeSessionNotFound		= 4001,
 	CoAPMessage_OptionCodeSessionExpired		= 4003,
@@ -114,40 +116,44 @@ struct CoAPMessage_Option {
 TAILQ_HEAD(CoAPMessage_OptionHead, CoAPMessage_Option);
 
 
-static inline bool CoAPMessage_CodeIsEmpty(enum CoAPMessage_Code code)
+static inline bool CoAPMessage_CodeIsEmpty(int code)
 {
 	return code == CoAPMessage_CodeEmpty;
 }
 
-static inline bool CoAPMessage_CodeIsRequest(enum CoAPMessage_Code code)
+static inline bool CoAPMessage_CodeIsRequest(int code)
 {
 	return code >= CoAPMessage_CodeGet && code <= CoAPMessage_CodeDelete;
 }
 
-static inline bool CoAPMessage_CodeIsResponse(enum CoAPMessage_Code code)
+static inline bool CoAPMessage_CodeIsResponse(int code)
 {
 	return code >= CoAPMessage_CodeCreated && code <= CoAPMessage_CodeMax;
 }
 
-static inline bool CoAPMessage_TypeIsRequest(enum CoAPMessage_Type type)
+static inline bool CoAPMessage_TypeIsRequest(int type)
 {
 	return type == CoAPMessage_TypeCon || type == CoAPMessage_TypeNon;
 }
 
-static inline bool CoAPMessage_TypeIsResponse(enum CoAPMessage_Type type)
+static inline bool CoAPMessage_TypeIsResponse(int type)
 {
 	return type == CoAPMessage_TypeAck || type == CoAPMessage_TypeRst;
 }
 
 extern void CoAPMessage_Init(void);
 
+#define CoAPMessage_FlagGenToken	BIT(0)
 extern struct CoAPMessage *CoAPMessage(enum CoAPMessage_Type type,
 				       enum CoAPMessage_Code code,
-				       int id);
+				       int id,
+				       unsigned flags);
+extern void CoAPMessage_Free(struct CoAPMessage *m);
+
+#define CoAPMessage_CloneFlagPayload	BIT(0)
+#define CoAPMessage_CloneFlagCb		BIT(1)
 extern struct CoAPMessage *CoAPMessage_Clone(struct CoAPMessage *m,
-					     bool payload);
-extern void CoAPMessage_Decref(struct CoAPMessage *m);
-extern struct CoAPMessage *CoAPMessage_Incref(struct CoAPMessage *m);
+					     unsigned flags);
 
 extern uint16_t CoAPMessage_GenId(void);
 extern int CoAPMessage_GetId(struct CoAPMessage *m);
@@ -205,12 +211,13 @@ static inline bool CoAPMessage_IsPing(struct CoAPMessage *m)
 
 extern bool CoAPMessage_IsMulticast(struct CoAPMessage *m);
 
-#define CoAPMessage_GetPayload_Alloc	BIT(0)
-#define CoAPMessage_GetPayload_Zero	BIT(1)
+#define CoAPMessage_GetPayloadFlagAlloc	BIT(0)
+#define CoAPMessage_GetPayloadFlagZero	BIT(1)
 extern uint8_t *CoAPMessage_GetPayload(struct CoAPMessage *m, size_t *size,
 				       unsigned flags);
 extern int CoAPMessage_SetPayload(struct CoAPMessage *m, const uint8_t *payload,
 				  size_t size);
+extern int CoAPMessage_SetPayloadString(struct CoAPMessage *m, const char *s);
 
 #define COAP_MESSAGE_MAX_TOKEN_SIZE	8
 extern int CoAPMessage_GenToken(uint8_t *token, size_t size);
@@ -220,16 +227,21 @@ extern int CoAPMessage_SetToken(struct CoAPMessage *m, const uint8_t *token,
 				size_t size);
 extern int CoAPMessage_CopyToken(struct CoAPMessage *d, struct CoAPMessage *s);
 
-extern char *CoAPMessage_GetUri(struct CoAPMessage *m, bool encode);
+extern char *CoAPMessage_GetUri(struct CoAPMessage *m);
 
-#define CoAPMessage_SetUri_OnlySecure	BIT(0)
-#define CoAPMessage_SetUri_OnlyIpPort	BIT(1)
-#define CoAPMessage_SetUri_OnlyPath	BIT(2)
-#define CoAPMessage_SetUri_OnlyQuery	BIT(3)
+#define CoAPMessage_SetUriFlagOnlySecure	BIT(0)
+#define CoAPMessage_SetUriFlagOnlyIpPort	BIT(1)
+#define CoAPMessage_SetUriFlagOnlyPath		BIT(2)
+#define CoAPMessage_SetUriFlagOnlyQuery		BIT(3)
+#define CoAPMessage_SetUriFlagFormat		BIT(4)
+#define CoAPMessage_SetUriFlagOnlyMask		(CoAPMessage_SetUriFlagOnlySecure | \
+						 CoAPMessage_SetUriFlagOnlyIpPort | \
+						 CoAPMessage_SetUriFlagOnlyPath   | \
+						 CoAPMessage_SetUriFlagOnlyQuery)
 extern int CoAPMessage_SetUri(struct CoAPMessage *m, const char *uri,
-			      unsigned flags);
+			      unsigned flags, ...);
 
-extern char *CoAPMessage_GetUriPath(struct CoAPMessage *m, bool encode);
+extern char *CoAPMessage_GetUriPath(struct CoAPMessage *m);
 extern int CoAPMessage_SetUriPath(struct CoAPMessage *m, const char *path);
 
 extern int CoAPMessage_SetSecure(struct CoAPMessage *m, bool on);
@@ -240,9 +252,8 @@ static inline bool CoAPMessage_IsSecure(struct CoAPMessage *m)
 	return !CoAPMessage_GetSecure(m, &on) && on;
 }
 
-
 extern int CoAPMessage_SetUriQuery(struct CoAPMessage *m, const char *query);
-extern char *CoAPMessage_GetUriQuery(struct CoAPMessage *m, bool encode);
+extern char *CoAPMessage_GetUriQuery(struct CoAPMessage *m);
 
 extern int CoAPMessage_AddOptionOpaque(struct CoAPMessage *m,
 				       enum CoAPMessage_OptionCode code,
@@ -293,7 +304,10 @@ extern uint8_t *CoAPMessage_ToBytes(struct CoAPMessage *m, size_t *size);
 
 extern struct CoAPMessage *CoAPMessage_FromBytes(uint8_t *d, size_t size);
 
-extern int CoAPMessage_Equals(struct CoAPMessage *m1, struct CoAPMessage *m2);
+#define CoAPMessage_EqualsFlagOnlyId	BIT(0)
+#define CoAPMessage_EqualsFlagOnlyToken	BIT(1)
+extern int CoAPMessage_Equals(struct CoAPMessage *m1, struct CoAPMessage *m2,
+			      unsigned flags);
 
 extern int CoAPMessage_ToBuf(struct CoAPMessage *m, struct Buf_Handle *b);
 extern int CoAPMessage_Print(struct CoAPMessage *m, FILE *fp);
@@ -342,10 +356,30 @@ extern int CoAPMessage_SetSockAddr(struct CoAPMessage *m,
 extern int CoAPMessage_CopySockAddr(struct CoAPMessage *d,
 				    struct CoAPMessage *s);
 
-typedef int (*CoAPMessage_Handler_t)(struct Coala *, struct CoAPMessage *);
+extern int CoAPMessage_GetProxySecurityId(struct CoAPMessage *m, uint32_t *v);
+extern int CoAPMessage_SetProxySecurityId(struct CoAPMessage *m, uint32_t v);
+static inline int CoAPMessage_CopyProxySecurityId(struct CoAPMessage *d,
+						  struct CoAPMessage *s)
+{
+	return CoAPMessage_CopyOption(d, s,
+				      CoAPMessage_OptionCodeProxySecurityId);
+}
 
-extern int CoAPMessage_SetHandler(struct CoAPMessage *m,
-				  CoAPMessage_Handler_t h);
-extern CoAPMessage_Handler_t CoAPMessage_GetHandler(struct CoAPMessage *m);
+enum CoAPMessage_CbErr {
+	CoAPMessage_CbErrNone,
+	CoAPMessage_CbErrExpire
+};
+
+typedef void (*CoAPMessage_Cb_t)(struct Coala *, int fd, enum CoAPMessage_CbErr,
+				 struct CoAPMessage *, void *arg);
+extern int CoAPMessage_GetCb(struct CoAPMessage *m, CoAPMessage_Cb_t *cb,
+			     void **arg);
+extern int CoAPMessage_SetCb(struct CoAPMessage *m, CoAPMessage_Cb_t cb,
+			     void *arg);
+extern int CoAPMessage_CopyCb(struct CoAPMessage *d, struct CoAPMessage *s);
+
+extern bool CoAPMessage_TestFlag(struct CoAPMessage *m, unsigned nr);
+extern void CoAPMessage_SetFlag(struct CoAPMessage *m, unsigned nr);
+extern void CoAPMessage_ClearFlag(struct CoAPMessage *m, unsigned nr);
 
 #endif

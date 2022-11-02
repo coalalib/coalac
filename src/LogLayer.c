@@ -7,12 +7,11 @@
 #include <coala/Buf.h>
 #include <coala/Coala.h>
 #include <coala/CoAPMessage.h>
-#include <coala/Mem.h>
-#include <coala/Sin.h>
+#include <coala/Str.h>
 
 #include "LogLayer.h"
-#include "Str.h"
 
+#ifndef NDEBUG
 static int IterOptionsCb(enum CoAPMessage_OptionCode code, uint8_t *v, size_t s,
 			 bool last, void *data)
 {
@@ -48,7 +47,7 @@ static int IterOptionsCb(enum CoAPMessage_OptionCode code, uint8_t *v, size_t s,
 static int Log(struct CoAPMessage *m, bool send, bool options, bool payload)
 {
 	int errsv = 0, res = -1;
-	size_t s, tok_size;
+	size_t s = 0, tok_size;
 	struct Buf_Handle *b = NULL;
 	struct CoAPMessage_Block bl1, bl2;
 	uint8_t *d, tok[COAP_MESSAGE_MAX_TOKEN_SIZE];
@@ -74,22 +73,22 @@ static int Log(struct CoAPMessage *m, bool send, bool options, bool payload)
 	if (CoAPMessage_IsRequest(m)) {
 		char *s;
 
-		if ((s = CoAPMessage_GetUriPath(m, false))) {
+		if ((s = CoAPMessage_GetUriPath(m))) {
 			if (Buf_AddFormatStr(b, " %s", s) < 0) {
 				errsv = errno;
-				Mem_free(s);
+				free(s);
 				goto out;
 			}
-			Mem_free(s);
+			free(s);
 		}
 
-		if ((s = CoAPMessage_GetUriQuery(m, false))) {
+		if ((s = CoAPMessage_GetUriQuery(m))) {
 			if (Buf_AddFormatStr(b, " %s", s) < 0) {
 				errsv = errno;
-				Mem_free(s);
+				free(s);
 				goto out;
 			}
-			Mem_free(s);
+			free(s);
 		}
 	}
 
@@ -133,7 +132,7 @@ static int Log(struct CoAPMessage *m, bool send, bool options, bool payload)
 	}
 
 	unsigned port = ndm_ip_sockaddr_port(&sa);
-	if (port != COALA_PORT_DEFAULT &&
+	if (port != COALA_PORT &&
 	    Buf_AddFormatStr(b, ":%u", port) < 0) {
 		errsv = errno;
 		goto out;
@@ -212,20 +211,24 @@ out:
 
 	return res;
 }
+#endif
 
 enum LayerStack_Ret
 LogLayer_OnReceive(
 		struct Coala *c,
+		int fd,
 		struct CoAPMessage *msg,
 		unsigned flags,
 		struct Err *err)
 {
+#ifndef NDEBUG
 	int l = ndm_log_get_debug();
 
 	if (l == LDEBUG_1)
-		Log(msg, false, false, false);
+		Log(msg, false, true, false);
 	else if (l >= LDEBUG_2)
 		Log(msg, false, true, true);
+#endif
 
 	return LayerStack_Con;
 }
@@ -233,16 +236,19 @@ LogLayer_OnReceive(
 enum LayerStack_Ret
 LogLayer_OnSend(
 		struct Coala *c,
+		int fd,
 		struct CoAPMessage *msg,
 		unsigned flags,
 		struct Err *err)
 {
+#ifndef NDEBUG
 	int l = ndm_log_get_debug();
 
 	if (l == LDEBUG_1)
-		Log(msg, true, false, false);
+		Log(msg, true, true, false);
 	else if (l >= LDEBUG_2)
 		Log(msg, true, true, true);
+#endif
 
 	return LayerStack_Con;
 }

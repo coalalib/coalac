@@ -8,13 +8,15 @@
 
 #include "ArqBlock1Layer.h"
 #include "ArqBlock2Layer.h"
+#include "CacheLayer.h"
 #include "LogLayer.h"
-#include "RequestLayer.h"
-#include "ResponseLayer.h"
-#include "SecurityLayer.h"
+#include "ReqLayer.h"
+#include "ResLayer.h"
+#include "SecLayer.h"
 
 typedef enum LayerStack_Ret (*LayerHandler_t)(
 	struct Coala *c,
+	int fd,
 	struct CoAPMessage *msg,
 	unsigned flags,
 	struct Err *err);
@@ -34,10 +36,15 @@ struct LayerDsc ReceiveLayers[] = {
 		.name = "log",
 		.handler = LogLayer_OnReceive
 	}, {
+		.name = "cac",
+		.handler = CacheLayer_OnReceive,
+		.init = CacheLayer_Init,
+		.deinit = CacheLayer_Deinit
+	}, {
 		.name = "sec",
-		.handler = SecurityLayer_OnReceive,
-		.init = SecurityLayer_Init,
-		.deinit = SecurityLayer_Deinit
+		.handler = SecLayer_OnReceive,
+		.init = SecLayer_Init,
+		.deinit = SecLayer_Deinit
 	}, {
 		.name = "log",
 		.handler = LogLayer_OnReceive
@@ -49,10 +56,10 @@ struct LayerDsc ReceiveLayers[] = {
 		.handler = ArqBlock2Layer_OnReceive
 	}, {
 		.name = "req",
-		.handler = RequestLayer_OnReceive
+		.handler = ReqLayer_OnReceive
 	}, {
 		.name = "res",
-		.handler = ResponseLayer_OnReceive
+		.handler = ResLayer_OnReceive
 	}
 };
 
@@ -68,15 +75,17 @@ struct LayerDsc SendLayers[] = {
 		.handler = LogLayer_OnSend
 	}, {
 		.name = "sec",
-		.handler = SecurityLayer_OnSend
+		.handler = SecLayer_OnSend
 	}
 };
 
+#ifndef NDEBUG
 static const char *LayerStack_Ret2Str(enum LayerStack_Ret r)
 {
 	const char *a[] = {"continue", "stop", "error"};
 	return a[r];
 }
+#endif
 
 int LayerStack_Init(struct Coala *c, struct Err *err)
 {
@@ -88,7 +97,10 @@ int LayerStack_Init(struct Coala *c, struct Err *err)
 			continue;
 
 		if ((ret = f(c, err)) < 0)
+		{
+			LayerStack_Deinit(c);
 			return ret;
+		}
 	}
 
 	for (size_t i = 0; i < NDM_ARRAY_SIZE(SendLayers); i++) {
@@ -96,7 +108,10 @@ int LayerStack_Init(struct Coala *c, struct Err *err)
 			continue;
 
 		if ((ret = f(c, err)) < 0)
+		{
+			LayerStack_Deinit(c);
 			return ret;
+		}
 	}
 
 	return 0;
@@ -122,11 +137,12 @@ void LayerStack_Deinit(struct Coala *c)
 enum LayerStack_Ret
 LayerStack_OnReceive(
 		struct Coala *c,
+		int fd,
 		struct CoAPMessage *msg,
 		unsigned flags,
 		struct Err *err)
 {
-	int ret;
+	int ret = LayerStack_Err;
 
 	if (c == NULL || msg == NULL)
 		return LayerStack_Err;
@@ -138,18 +154,22 @@ LayerStack_OnReceive(
 		if (n == NULL || h == NULL)
 			continue;
 
+#ifndef NDEBUG
 		NDM_LOG_DEBUG_3("[%d] RL#%zu \"%s\": enter",
 				CoAPMessage_GetId(msg),
 				i,
 				ReceiveLayers[i].name);
+#endif
 
-		ret = h(c, msg, flags, err);
+		ret = h(c, fd, msg, flags, err);
 
+#ifndef NDEBUG
 		NDM_LOG_DEBUG_3("[%d] RL#%zu \"%s\": %s",
 				CoAPMessage_GetId(msg),
 				i,
 				ReceiveLayers[i].name,
 				LayerStack_Ret2Str(ret));
+#endif
 
 		if (ret != LayerStack_Con)
 			break;
@@ -161,11 +181,12 @@ LayerStack_OnReceive(
 enum LayerStack_Ret
 LayerStack_OnSend(
 		struct Coala *c,
+		int fd,
 		struct CoAPMessage *msg,
 		unsigned flags,
 		struct Err *err)
 {
-	int ret;
+	int ret = LayerStack_Err;
 
 	if (c == NULL || msg == NULL)
 		return LayerStack_Err;
@@ -177,18 +198,22 @@ LayerStack_OnSend(
 		if (n == NULL || h == NULL)
 			continue;
 
+#ifndef NDEBUG
 		NDM_LOG_DEBUG_3("[%d] SL#%zu \"%s\": enter",
 				CoAPMessage_GetId(msg),
 				i,
 				SendLayers[i].name);
+#endif
 
-		ret = h(c, msg, flags, err);
+		ret = h(c, fd, msg, flags, err);
 
+#ifndef NDEBUG
 		NDM_LOG_DEBUG_3("[%d] SL#%zu \"%s\": %s",
 				CoAPMessage_GetId(msg),
 				i,
 				SendLayers[i].name,
 				LayerStack_Ret2Str(ret));
+#endif
 
 		if (ret != LayerStack_Con)
 			break;

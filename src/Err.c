@@ -1,5 +1,3 @@
-#define _GNU_SOURCE	/* GNU variant of strerror_r */
-
 #include <errno.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -38,9 +36,6 @@ void Err_Set(struct Err *e, int code, const char *fmt, ...)
 	va_end(ap);
 
 	l = strlen(e->dsc);
-	if (e->dsc[l - 1] == ':') {
-		char buf[100];
-		snprintf(e->dsc + l, sizeof e->dsc - l, " %s",
-			 strerror_r(errsv, buf, sizeof buf));
-	}
+	if (e->dsc[l - 1] == ':')
+		snprintf(e->dsc + l, sizeof e->dsc - l, " %s", strerror(errsv));
 }

@@ -11,11 +11,10 @@
 #include <string.h>
 
 #include <coala/Buf.h>
-#include <coala/Mem.h>
+#include <coala/Str.h>
 #include <coala/Uri.h>
 #include <coala/queue.h>
 
-#include "Str.h"
 
 /*
  * Simple URI parser.
@@ -73,7 +72,7 @@ int Uri_Parse(struct Uri *u, const char *uri)
 
 	so = match[MATCH_HOST].rm_so;
 	eo = match[MATCH_HOST].rm_eo;
-	if ((u->host = Mem_strndup(uri + so, eo - so)) == NULL)
+	if ((u->host = strndup(uri + so, eo - so)) == NULL)
 		goto out_regfree;
 
 	so = match[MATCH_PORT].rm_so;
@@ -101,14 +100,14 @@ int Uri_Parse(struct Uri *u, const char *uri)
 		if (*(uri + eo - 1) == '/')
 			eo--;
 
-		if ((u->path = Mem_strndup(uri + so, eo - so)) == NULL)
+		if ((u->path = strndup(uri + so, eo - so)) == NULL)
 			goto out_free;
 	}
 
 	so = match[MATCH_QUERY].rm_so;
 	eo = match[MATCH_QUERY].rm_eo;
 	if (so != -1) {
-		if ((u->query = Mem_strndup(uri + so, eo - so)) == NULL)
+		if ((u->query = strndup(uri + so, eo - so)) == NULL)
 			goto out_free;
 	}
 
@@ -116,9 +115,9 @@ int Uri_Parse(struct Uri *u, const char *uri)
 	goto out_regfree;
 
 out_free:
-	Mem_free(u->host);
-	Mem_free(u->path);
-	Mem_free(u->query);
+	free(u->host);
+	free(u->path);
+	free(u->query);
 out_regfree:
 	regfree(&reg);
 out:
@@ -133,14 +132,13 @@ void Uri_ParseFree(struct Uri *u)
 	if (u == NULL)
 		return;
 
-	Mem_free(u->host);
-	Mem_free(u->path);
-	Mem_free(u->query);
+	free(u->host);
+	free(u->path);
+	free(u->query);
 }
 
-int Uri_ParsePath(struct Uri_ParsePathHead *head, const char *path)
+int Uri_PathParse(const char *path, struct Uri_PathHead *head)
 {
-	char *path_dec = NULL;
 	const char *p, *q;
 	int errsv = 0, res = -1;
 
@@ -151,24 +149,23 @@ int Uri_ParsePath(struct Uri_ParsePathHead *head, const char *path)
 
 	path++;
 
-	path_dec = Uri_DecodeStr(path);
-	if (path_dec == NULL) {
-		errsv = errno;
+	if (*path == '\0') {
+		errsv = EINVAL;
 		goto out;
 	}
 
-	p = q = path_dec;
+	p = q = path;
 	while (true) {
 		if (*p == '/' || *p == '\0') {
 			size_t n = p - q;
-			struct Uri_ParsePathEntry *e;
+			struct Uri_PathEntry *e;
 
 			if (n) {
-				e = Mem_calloc(1, sizeof(*e));
+				e = calloc(1, sizeof(*e));
 				if (e == NULL ||
-				    (e->s = Mem_strndup(q, n)) == NULL) {
+				    (e->val = Uri_StrDecode(q, n)) == NULL) {
 					errsv = errno;
-					Mem_free(e);
+					free(e);
 					goto out_free;
 				}
 
@@ -186,34 +183,56 @@ int Uri_ParsePath(struct Uri_ParsePathHead *head, const char *path)
 	goto out;
 
 out_free:
-	Uri_ParsePathFree(head);
+	Uri_PathHeadFree(head);
 out:
-	Mem_free(path_dec);
-
 	if (errsv)
 		errno = errsv;
 
 	return res;
 }
 
-void Uri_ParsePathFree(struct Uri_ParsePathHead *head)
+struct Uri_PathEntry *Uri_PathEntry(const char *val)
 {
-	struct Uri_ParsePathEntry *e, *t;
+	if (val == NULL) {
+		errno = EINVAL;
+		return NULL;
+	}
+
+	struct Uri_PathEntry *e;
+	if ((e = calloc(1, sizeof(*e))) == NULL ||
+	    (e->val = strdup(val)) == NULL) {
+		free(e);
+		return NULL;
+	}
+
+	return e;
+}
+
+void Uri_PathEntryFree(struct Uri_PathEntry *e)
+{
+	if (e == NULL)
+		return;
+
+	free(e->val);
+	free(e);
+}
+
+void Uri_PathHeadFree(struct Uri_PathHead *head)
+{
+	struct Uri_PathEntry *e, *t;
 
 	if (head == NULL)
 		return;
 
 	STAILQ_FOREACH_SAFE(e, head, list, t) {
-		STAILQ_REMOVE(head, e, Uri_ParsePathEntry, list);
-		Mem_free(e->s);
-		Mem_free(e);
+		STAILQ_REMOVE(head, e, Uri_PathEntry, list);
+		Uri_PathEntryFree(e);
 	}
 }
 
-int Uri_ParseQuery(struct Uri_ParseQueryHead *head, const char *query,
+int Uri_QueryParse(const char *query, struct Uri_QueryHead *head,
 		   bool parse_key_value)
 {
-	char *query_dec = NULL;
 	const char *p, *q;
 	int errsv = 0, res = -1;
 
@@ -224,44 +243,44 @@ int Uri_ParseQuery(struct Uri_ParseQueryHead *head, const char *query,
 
 	query++;
 
-	query_dec = Uri_DecodeStr(query);
-	if (query_dec == NULL) {
-		errsv = errno;
+	if (*query == '\0') {
+		errsv = EINVAL;
 		goto out;
 	}
 
-	p = q = query_dec;
+	p = q = query;
 	while (true) {
 		if (*p == '&' || *p == '\0') {
 			size_t n = p - q;
-			struct Uri_ParseQueryEntry *e;
+			struct Uri_QueryEntry *e;
 
 			if (n) {
 				const char *v;
 
-				if ((e = Mem_calloc(1, sizeof(*e))) == NULL)
+				if ((e = calloc(1, sizeof(*e))) == NULL)
 					goto out_free;
 
 				if (parse_key_value) {
 					v = Str_strnchr(q, n, '=');
 					if (v) {
-						size_t value_len;
+						size_t val_len;
 						n = v - q;
 						v++;
 
-						value_len = p - v;
-						if (value_len &&
-						    (e->value = Mem_strndup(v, value_len)) == NULL) {
+						val_len = p - v;
+						if (val_len &&
+						    (e->val = Uri_StrDecode(v, val_len)) == NULL) {
 							errsv = errno;
-							Mem_free(e);
+							free(e);
 							goto out_free;
 						}
 					}
 				}
 
-				if ((e->key = Mem_strndup(q, n)) == NULL) {
+				if ((e->key = Uri_StrDecode(q, n)) == NULL) {
 					errsv = errno;
-					Mem_free(e);
+					free(e->val);
+					free(e);
 					goto out_free;
 				}
 
@@ -279,41 +298,72 @@ int Uri_ParseQuery(struct Uri_ParseQueryHead *head, const char *query,
 	goto out;
 
 out_free:
-	Uri_ParseQueryFree(head);
+	Uri_QueryHeadFree(head);
 out:
-	Mem_free(query_dec);
-
 	if (errsv)
 		errno = errsv;
 
 	return res;
 }
 
-void Uri_ParseQueryFree(struct Uri_ParseQueryHead *head)
+struct Uri_QueryEntry *Uri_QueryEntry(const char *key, const char *val)
 {
-	struct Uri_ParseQueryEntry *e, *t;
+	if (key == NULL) {
+		errno = EINVAL;
+		return NULL;
+	}
+
+	struct Uri_QueryEntry *e = calloc(1, sizeof(*e));
+	if (e == NULL)
+		return NULL;
+
+	if ((e->key = strdup(key)) == NULL) {
+		free(e);
+		return NULL;
+	}
+
+	if (val && ((e->val = strdup(val)) == NULL)) {
+		free(e->key);
+		free(e);
+		return NULL;
+	}
+
+	return e;
+}
+
+void Uri_QueryEntryFree(struct Uri_QueryEntry *e)
+{
+	if (e == NULL)
+		return;
+
+	free(e->key);
+	free(e->val);
+	free(e);
+}
+
+void Uri_QueryHeadFree(struct Uri_QueryHead *head)
+{
+	struct Uri_QueryEntry *e, *t;
 
 	if (head == NULL)
 		return;
 
 	STAILQ_FOREACH_SAFE(e, head, list, t) {
-		STAILQ_REMOVE(head, e, Uri_ParseQueryEntry, list);
-		Mem_free(e->key);
-		Mem_free(e->value);
-		Mem_free(e);
+		STAILQ_REMOVE(head, e, Uri_QueryEntry, list);
+		Uri_QueryEntryFree(e);
 	}
 }
 
-char *Uri_EncodeStr(const char *s)
+char *Uri_StrEncode(const char *s)
 {
 	char *r, *rp;
 
-	if (s == NULL || *s == '\0') {
+	if (s == NULL) {
 		errno = EINVAL;
 		return NULL;
 	}
 
-	if ((r = Mem_malloc(strlen(s) * 3 + 1)) == NULL)
+	if ((r = malloc(strlen(s) * 3 + 1)) == NULL)
 		return NULL;
 
 	rp = r;
@@ -337,30 +387,42 @@ char *Uri_EncodeStr(const char *s)
 	return r;
 }
 
-char *Uri_DecodeStr(const char *s)
+char *Uri_StrDecode(const char *s, size_t n)
 {
 	char *r, *rp;
+	size_t l;
 
 	if (s == NULL || *s == '\0') {
 		errno = EINVAL;
 		return NULL;
 	}
 
-	if ((r = Mem_malloc(strlen(s) + 1)) == NULL)
+	l = strlen(s);
+	if (!n) {
+		n = l;
+	} else if (n > l) {
+		errno = EINVAL;
+		return NULL;
+	}
+
+	if ((r = malloc(n + 1)) == NULL)
 		return NULL;
 
 	rp = r;
 
-	while (*s) {
+	while (n > 0) {
 		if (*s == '%') {
-			if (isxdigit(*(s + 1)) && isxdigit(*(s + 2))) {
+			if (n >= 3 &&
+			    isxdigit(*(s + 1)) &&
+			    isxdigit(*(s + 2))) {
 				unsigned char t;
 				t = Str_Char2Hex(*(s + 1)) << 4;
 				t |= Str_Char2Hex(*(s + 2));
 				*rp++ = t;
 				s += 2;
+				n -= 2;
 			} else {
-				Mem_free(r);
+				free(r);
 				errno = EBADMSG;
 				return NULL;
 			}
@@ -371,6 +433,7 @@ char *Uri_DecodeStr(const char *s)
 		}
 
 		s++;
+		n--;
 	}
 
 	*rp = '\0';
@@ -412,21 +475,14 @@ out:
 	return res;
 }
 
-char *Uri_EncodePath(const char *path)
+char *Uri_PathGen(struct Uri_PathHead *head)
 {
-	char *pathd = NULL, *res = NULL, *saveptr;
+	char *res = NULL;
 	int errsv = 0;
 	struct Buf_Handle *b = NULL;
 
-	if (path == NULL || *path != '/') {
+	if (head == NULL) {
 		errsv = EINVAL;
-		goto out;
-	}
-
-	path++;
-
-	if ((pathd = Mem_strdup(path)) == NULL) {
-		errsv = errno;
 		goto out;
 	}
 
@@ -435,25 +491,28 @@ char *Uri_EncodePath(const char *path)
 		goto out;
 	}
 
-	for (char *s = pathd; ; s = NULL) {
-		char *it, *it_enc;
+	struct Uri_PathEntry *e;
+	STAILQ_FOREACH(e, head, list) {
+		char *s_enc;
 
-		if ((it = strtok_r(s, "/", &saveptr)) == NULL)
-			break;
-
-		if ((it_enc = Uri_EncodeStr(it)) == NULL) {
+		if ((s_enc = Uri_StrEncode(e->val)) == NULL) {
 			errsv = errno;
 			goto out;
 		}
 
-		if (Buf_AddCh(b, '/') < 0 ||
-		    Buf_AddStr(b, it_enc) < 0) {
+		if (Buf_AddCh(b, '/') < 0) {
 			errsv = errno;
-			Mem_free(it_enc);
+			free(s_enc);
 			goto out;
 		}
 
-		Mem_free(it_enc);
+		if (*s_enc && Buf_AddStr(b, s_enc) < 0) {
+			errsv = errno;
+			free(s_enc);
+			goto out;
+		}
+
+		free(s_enc);
 	}
 
 	if (Buf_AddCh(b, '\0') < 0) {
@@ -465,7 +524,6 @@ char *Uri_EncodePath(const char *path)
 		errsv = errno;
 
 out:
-	Mem_free(pathd);
 	Buf_Free(b);
 
 	if (errsv)
@@ -474,22 +532,15 @@ out:
 	return res;
 }
 
-char *Uri_EncodeQuery(const char *query, bool encode_key_value)
+char *Uri_QueryGen(struct Uri_QueryHead *head)
 {
-	char *res = NULL, *saveptr, *queryd = NULL;
+	char *res = NULL;
 	int errsv = 0;
 	size_t s;
 	struct Buf_Handle *b = NULL;
 
-	if (query == NULL || *query != '?') {
+	if (head == NULL) {
 		errsv = EINVAL;
-		goto out;
-	}
-
-	query++;
-
-	if ((queryd = Mem_strdup(query)) == NULL) {
-		errsv = errno;
 		goto out;
 	}
 
@@ -499,43 +550,36 @@ char *Uri_EncodeQuery(const char *query, bool encode_key_value)
 		goto out;
 	}
 
-	for (char *s = queryd; ; s = NULL) {
-		char *it, *t;
-
-		if ((it = strtok_r(s, "&", &saveptr)) == NULL)
-			break;
-
-		if (encode_key_value && (t = strchr(it, '='))) {
-			char *key = it, *val = t + 1;
+	struct Uri_QueryEntry *e;
+	STAILQ_FOREACH(e, head, list) {
+		if (e->key && e->val) {
 			char *key_enc = NULL, *val_enc = NULL;
 
-			*t = '\0';
-
-			if ((key_enc = Uri_EncodeStr(key)) == NULL ||
-			    (val_enc = Uri_EncodeStr(val)) == NULL ||
+			if ((key_enc = Uri_StrEncode(e->key)) == NULL ||
+			    (val_enc = Uri_StrEncode(e->val)) == NULL ||
 			    Buf_AddFormatStr(b, "%s=%s", key_enc, val_enc) < 0) {
 				errsv = errno;
-				Mem_free(key_enc);
-				Mem_free(val_enc);
+				free(key_enc);
+				free(val_enc);
 				goto out;
 			}
 
-			Mem_free(key_enc);
-			Mem_free(val_enc);
+			free(key_enc);
+			free(val_enc);
+		} else if (e->key && e->val == NULL) {
+			char *key_enc;
+
+			if ((key_enc = Uri_StrEncode(e->key)) == NULL ||
+			    Buf_AddStr(b, key_enc) < 0) {
+				errsv = errno;
+				free(key_enc);
+				goto out;
+			}
+
+			free(key_enc);
 		} else {
-			char *it_enc = Uri_EncodeStr(it);
-			if (it_enc == NULL) {
-				errsv = errno;
-				goto out;
-			}
-
-			if (Buf_AddStr(b, it_enc) < 0) {
-				errsv = errno;
-				Mem_free(it_enc);
-				goto out;
-			}
-
-			Mem_free(it_enc);
+			errsv = EINVAL;
+			goto out;
 		}
 
 		if (Buf_AddCh(b, '&') < 0) {
@@ -559,7 +603,6 @@ char *Uri_EncodeQuery(const char *query, bool encode_key_value)
 		res[s] = '\0';
 
 out:
-	Mem_free(queryd);
 	Buf_Free(b);
 
 	if (errsv)

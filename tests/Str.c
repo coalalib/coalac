@@ -8,7 +8,7 @@
 #include <string.h>
 #include <cmocka.h>
 
-#include "Str.h"
+#include <coala/Str.h>
 
 static const struct {
 	char c;

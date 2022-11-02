@@ -15,6 +15,7 @@ enum LayerStack_Ret {
 extern enum LayerStack_Ret
 LayerStack_OnReceive(
 		struct Coala *c,
+		int fd,
 		struct CoAPMessage *msg,
 		unsigned flags,
 		struct Err *err);
@@ -22,6 +23,7 @@ LayerStack_OnReceive(
 extern enum LayerStack_Ret
 LayerStack_OnSend(
 		struct Coala *c,
+		int fd,
 		struct CoAPMessage *msg,
 		unsigned flags,
 		struct Err *err);

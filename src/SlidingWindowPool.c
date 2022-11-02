@@ -1,25 +1,22 @@
 #include <errno.h>
-#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include <coala/Mem.h>
 #include <coala/queue.h>
+#include <coala/Str.h>
 #include <ndm/log.h>
+#include <ndm/time.h>
 
 #include "SlidingWindowPool.h"
-#include "Str.h"
-#include "TimeMono.h"
 
-static pthread_mutex_t PoolMutex = PTHREAD_MUTEX_INITIALIZER;
+#define EXPIRE_SEC	30
 
 struct PoolEntry {
 	char *tok;
 	struct SlidingWindow *sw;
 	struct CoAPMessage *m;
-	CoAPMessage_Handler_t handler;
 	int code;
-	uint64_t timestamp;
+	struct timespec expire;
 	SLIST_ENTRY(PoolEntry) list;
 };
 
@@ -27,13 +24,27 @@ SLIST_HEAD(PoolHead, PoolEntry);
 
 struct SlidingWindowPool {
 	struct PoolHead head;
+	uint32_t current;
+	uint32_t total;
+	uint32_t orphan;
 };
+
+static void PoolEntryFree(struct PoolEntry *e)
+{
+	if (e == NULL)
+		return;
+
+	free(e->tok);
+	CoAPMessage_Free(e->m);
+	SlidingWindow_Free(e->sw);
+	free(e);
+}
 
 struct SlidingWindowPool *SlidingWindowPool(void)
 {
 	struct SlidingWindowPool *p;
 
-	if ((p = Mem_calloc(1, sizeof(*p))) == NULL)
+	if ((p = calloc(1, sizeof(*p))) == NULL)
 		return NULL;
 
 	SLIST_INIT(&p->head);
@@ -41,12 +52,44 @@ struct SlidingWindowPool *SlidingWindowPool(void)
 	return p;
 }
 
+void SlidingWindowPool_Free(struct SlidingWindowPool *p)
+{
+	struct PoolEntry *e, *t;
+
+	if (p == NULL)
+		return;
+
+	SLIST_FOREACH_SAFE(e, &p->head, list, t) {
+		SLIST_REMOVE(&p->head, e, PoolEntry, list);
+		PoolEntryFree(e);
+	}
+
+	free(p);
+}
+
+void SlidingWindowPool_Cleaner(struct SlidingWindowPool *p)
+{
+	struct PoolEntry *e, *t;
+
+	if (p == NULL)
+		return;
+
+	SLIST_FOREACH_SAFE(e, &p->head, list, t) {
+		if (ndm_time_left_monotonic_msec(&e->expire) >= 0)
+			continue;
+
+		SLIST_REMOVE(&p->head, e, PoolEntry, list);
+		PoolEntryFree(e);
+
+		p->current--;
+		p->orphan++;
+	}
+}
+
 struct SlidingWindow *SlidingWindowPool_Get(struct SlidingWindowPool *p,
 					    const char *tok,
-					    struct CoAPMessage **m,
-					    CoAPMessage_Handler_t *handler)
+					    struct CoAPMessage **m)
 {
-	int ret;
 	struct PoolEntry *e;
 	struct SlidingWindow *sw = NULL;
 
@@ -55,24 +98,18 @@ struct SlidingWindow *SlidingWindowPool_Get(struct SlidingWindowPool *p,
 		return NULL;
 	}
 
-	if ((ret = pthread_mutex_lock(&PoolMutex))) {
-		errno = ret;
-		return NULL;
-	}
-
 	SLIST_FOREACH(e, &p->head, list) {
 		if (strcmp(e->tok, tok) != 0)
 			continue;
 
+		ndm_time_get_monotonic(&e->expire);
+		ndm_time_add_sec(&e->expire, EXPIRE_SEC);
+
 		sw = e->sw;
 		if (m)
 			*m = e->m;
-		if (handler)
-			*handler = e->handler;
 		break;
 	}
-
-	pthread_mutex_unlock(&PoolMutex);
 
 	if (sw == NULL)
 		errno = ENOENT;
@@ -81,62 +118,60 @@ struct SlidingWindow *SlidingWindowPool_Get(struct SlidingWindowPool *p,
 }
 
 int SlidingWindowPool_Set(struct SlidingWindowPool *p, const char *tok,
-			  struct SlidingWindow *sw, struct CoAPMessage *m,
-			  CoAPMessage_Handler_t handler)
+			  struct SlidingWindow *sw, struct CoAPMessage *m)
 {
 	char *d = NULL;
-	int ret;
+	struct CoAPMessage *cp = NULL;
 	struct PoolEntry *e = NULL;
 
 	if (p == NULL || tok == NULL || sw == NULL) {
 		errno = EINVAL;
 		return -1;
-	} else if (SlidingWindowPool_Get(p, tok, NULL, NULL) != NULL) {
+	} else if (SlidingWindowPool_Get(p, tok, NULL) != NULL) {
 		errno = EEXIST;
 		return -1;
-	} else if ((e = Mem_calloc(1, sizeof(*e))) == NULL ||
-		   (d = Mem_strdup(tok)) == NULL) {
-		Mem_free(e);
+	} else if ((e = calloc(1, sizeof(*e))) == NULL ||
+		   (d = strdup(tok)) == NULL) {
+		free(e);
 		errno = ENOMEM;
 		return -1;
-	} else if ((ret = pthread_mutex_lock(&PoolMutex))) {
-		Mem_free(e);
-		Mem_free(d);
-		errno = ret;
+	} else if (m && (cp = CoAPMessage_Clone(m,
+					CoAPMessage_CloneFlagCb)) == NULL) {
+		free(e);
+		free(d);
+		errno = ENOMEM;
 		return -1;
 	}
 
-	e->timestamp = TimeMono_Us();
-	e->m = m;
+	ndm_time_get_monotonic(&e->expire);
+	ndm_time_add_sec(&e->expire, EXPIRE_SEC);
+	e->m = cp;
 	e->sw = sw;
 	e->tok = d;
-	e->handler = handler;
+
 	SLIST_INSERT_HEAD(&p->head, e, list);
 
-	pthread_mutex_unlock(&PoolMutex);
+	p->current++;
+	p->total++;
 
 	return 0;
 }
 
 int SlidingWindowPool_GetCode(struct SlidingWindowPool *p, const char *tok)
 {
-	int ret;
 	struct PoolEntry *e;
-
-	if ((ret = pthread_mutex_lock(&PoolMutex))) {
-		errno = ret;
-		return -1;
-	}
 
 	int code = -1;
 	SLIST_FOREACH(e, &p->head, list) {
 		if (strcmp(e->tok, tok) != 0)
 			continue;
 
+		ndm_time_get_monotonic(&e->expire);
+		ndm_time_add_sec(&e->expire, EXPIRE_SEC);
+
 		code = e->code;
 		break;
 	}
-	pthread_mutex_unlock(&PoolMutex);
 
 	if (code == -1)
 		errno = ENOENT;
@@ -148,23 +183,19 @@ int SlidingWindowPool_SetCode(struct SlidingWindowPool *p, const char *tok,
 			      int code)
 {
 	bool found = false;
-	int ret;
 	struct PoolEntry *e;
-
-	if ((ret = pthread_mutex_lock(&PoolMutex))) {
-		errno = ret;
-		return -1;
-	}
 
 	SLIST_FOREACH(e, &p->head, list) {
 		if (strcmp(e->tok, tok) != 0)
 			continue;
 
+		ndm_time_get_monotonic(&e->expire);
+		ndm_time_add_sec(&e->expire, EXPIRE_SEC);
 		e->code = code;
+
 		found = true;
 		break;
 	}
-	pthread_mutex_unlock(&PoolMutex);
 
 	if (!found)
 		errno = ENOENT;
@@ -175,50 +206,37 @@ int SlidingWindowPool_SetCode(struct SlidingWindowPool *p, const char *tok,
 int SlidingWindowPool_Del(struct SlidingWindowPool *p, const char *tok)
 {
 	bool del = false;
-	int ret;
 	struct PoolEntry *e, *t;
 
 	if (p == NULL || tok == NULL) {
 		errno = EINVAL;
 		return -1;
-	} else if ((ret = pthread_mutex_lock(&PoolMutex))) {
-		errno = ret;
-		return -1;
 	}
 
 	SLIST_FOREACH_SAFE(e, &p->head, list, t) {
-		size_t s;
-
 		if (strcmp(e->tok, tok) != 0)
 			continue;
 
+#ifndef NDEBUG
+		size_t s;
 		if (ndm_log_get_debug() >= LDEBUG_1 &&
 		    (s = SlidingWindow_GetSize(e->sw))) {
-			char buf_sz[20], buf_sp[30];
-			double sp;
-			uint64_t now = TimeMono_Us();
+			char buf_sz[20];
 
-			sp = s / ((now - e->timestamp) / 1000000.0);
-
-			NDM_LOG_DEBUG("ARQ %s transfer %s %s at %s",
+			NDM_LOG_DEBUG("ARQ %s transfer %s %s",
 				      SlidingWindow_IsRx(e->sw) ? "rx" : "tx",
 				      e->tok,
-				      Str_SizeFormat(s, buf_sz, sizeof buf_sz),
-				      Str_SpeedFormat(sp, buf_sp, sizeof buf_sp));
+				      Str_SizeFormat(s, buf_sz, sizeof buf_sz));
 		}
-
-		Mem_free(e->tok);
-		CoAPMessage_Decref(e->m);
-		SlidingWindow_Free(e->sw);
+#endif
 
 		SLIST_REMOVE(&p->head, e, PoolEntry, list);
-		Mem_free(e);
+		PoolEntryFree(e);
 
+		p->current--;
 		del = true;
 		break;
 	}
-
-	pthread_mutex_unlock(&PoolMutex);
 
 	if (!del) {
 		errno = ENOENT;
@@ -228,23 +246,18 @@ int SlidingWindowPool_Del(struct SlidingWindowPool *p, const char *tok)
 	return 0;
 }
 
-void SlidingWindowPool_Free(struct SlidingWindowPool *p)
+int SlidingWindowPool_Stats(struct SlidingWindowPool *p,
+			    struct SlidingWindowPool_Stats *st)
 {
-	struct PoolEntry *e, *t;
-
-	if (p == NULL ||
-	    pthread_mutex_lock(&PoolMutex))
-		return;
-
-
-	SLIST_FOREACH_SAFE(e, &p->head, list, t) {
-		Mem_free(e->tok);
-		CoAPMessage_Decref(e->m);
-		SlidingWindow_Free(e->sw);
-		Mem_free(e);
+	if (p == NULL || st == NULL) {
+		errno = EINVAL;
+		return -1;
 	}
 
-	Mem_free(p);
+	memset(st, 0, sizeof(*st));
+	st->current = p->current;
+	st->total = p->total;
+	st->orphan = p->orphan;
 
-	pthread_mutex_unlock(&PoolMutex);
+	return 0;
 }

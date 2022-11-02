@@ -6,6 +6,7 @@
 extern enum LayerStack_Ret
 ArqBlock2Layer_OnReceive(
 		struct Coala *c,
+		int fd,
 		struct CoAPMessage *msg,
 		unsigned flags,
 		struct Err *err);
@@ -13,6 +14,7 @@ ArqBlock2Layer_OnReceive(
 extern enum LayerStack_Ret
 ArqBlock2Layer_OnSend(
 		struct Coala *c,
+		int fd,
 		struct CoAPMessage *msg,
 		unsigned flags,
 		struct Err *err);

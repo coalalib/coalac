@@ -15,41 +15,47 @@ struct Uri {
 	char *query;	/* optional */
 };
 
-/* Generating */
 extern char *Uri_Gen(struct Uri *u);
 
-/* Parsing */
 extern int Uri_Parse(struct Uri *u, const char *uri);
 extern void Uri_ParseFree(struct Uri *u);
 
 /* Path */
-struct Uri_ParsePathEntry {
-	char *s;
-	STAILQ_ENTRY(Uri_ParsePathEntry) list;
+struct Uri_PathEntry {
+	char *val;
+	STAILQ_ENTRY(Uri_PathEntry) list;
 };
 
-STAILQ_HEAD(Uri_ParsePathHead, Uri_ParsePathEntry);
+STAILQ_HEAD(Uri_PathHead, Uri_PathEntry);
 
-extern int Uri_ParsePath(struct Uri_ParsePathHead *head, const char *path);
-extern void Uri_ParsePathFree(struct Uri_ParsePathHead *head);
+extern struct Uri_PathEntry *Uri_PathEntry(const char *s);
+extern void Uri_PathEntryFree(struct Uri_PathEntry *e);
+
+extern char *Uri_PathGen(struct Uri_PathHead *head);
+extern int Uri_PathParse(const char *path, struct Uri_PathHead *head);
+
+extern void Uri_PathHeadFree(struct Uri_PathHead *head);
 
 /* Query */
-struct Uri_ParseQueryEntry {
+struct Uri_QueryEntry {
 	char *key;
-	char *value;
-	STAILQ_ENTRY(Uri_ParseQueryEntry) list;
+	char *val;
+	STAILQ_ENTRY(Uri_QueryEntry) list;
 };
 
-STAILQ_HEAD(Uri_ParseQueryHead, Uri_ParseQueryEntry);
+STAILQ_HEAD(Uri_QueryHead, Uri_QueryEntry);
 
-extern int Uri_ParseQuery(struct Uri_ParseQueryHead *head, const char *query,
-			  bool parse_key_value);
-extern void Uri_ParseQueryFree(struct Uri_ParseQueryHead *head);
+extern struct Uri_QueryEntry *Uri_QueryEntry(const char *key, const char *val);
+extern void Uri_QueryEntryFree(struct Uri_QueryEntry *e);
 
-/* Encode */
-extern char *Uri_EncodeStr(const char *s);
-extern char *Uri_DecodeStr(const char *s);
-extern char *Uri_EncodePath(const char *path);
-extern char *Uri_EncodeQuery(const char *query, bool encode_key_value);
+extern char *Uri_QueryGen(struct Uri_QueryHead *head);
+extern int Uri_QueryParse(const char *query, struct Uri_QueryHead *head,
+			  bool parse_key_val);
+
+extern void Uri_QueryHeadFree(struct Uri_QueryHead *head);
+
+/* Str */
+extern char *Uri_StrEncode(const char *s);
+extern char *Uri_StrDecode(const char *s, size_t n);
 
 #endif
