@@ -3,6 +3,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include "Log_utils.h"
 
 enum SlidingWindow_Dir {
 	SlidingWindow_DirInput,
@@ -12,10 +13,19 @@ enum SlidingWindow_Dir {
 struct SlidingWindow;
 
 struct SlidingWindow_BlockFlags {
-	bool sent	: 1;
 	bool received	: 1;
-	bool last	: 1;
+	bool last		: 1;
+	struct timespec expire;
+	int attempts;
 };
+
+extern void SlidingWindowLog(struct SlidingWindow* sw,const char * type);
+extern void retransmitsInc(struct SlidingWindow *sw);
+extern void overflowIndicatorInc(struct SlidingWindow *sw);
+extern void pid_control(struct SlidingWindow *sw);
+extern void accept_block(struct SlidingWindow *sw, struct SlidingWindow_BlockFlags* bf, uint32_t block_num);
+extern void setTotalBlocks(struct SlidingWindow *sw, uint32_t num);
+extern bool isComplete(struct SlidingWindow* sw);
 
 extern struct SlidingWindow *SlidingWindow(enum SlidingWindow_Dir d,
 					   size_t block_size,
