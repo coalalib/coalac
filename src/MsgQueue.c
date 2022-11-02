@@ -6,11 +6,9 @@
 #include <coala/Coala.h>
 #include <coala/CoAPMessage.h>
 #include <ndm/time.h>
+#include "constants.h"
 
 #include "MsgQueue.h"
-
-#define EXPIRE_SEC	1
-#define MAX_ATTEMPS	6
 
 struct MsgQueueEntry {
 	int fd;
@@ -62,7 +60,7 @@ int MsgQueue_Add(int fd, struct CoAPMessage *m)
 	e->max_attemps = CoAPMessage_IsMulticast(m) ? 1 : MAX_ATTEMPS;
 
 	ndm_time_get_monotonic(&e->expire);
-	ndm_time_add_sec(&e->expire, EXPIRE_SEC);
+	ndm_time_add_msec(&e->expire, EXPIRATION_TIME);
 
 	TAILQ_INSERT_TAIL(&QueueHead, e, list);
 
@@ -77,6 +75,33 @@ void MsgQueue_Free(void)
 		TAILQ_REMOVE(&QueueHead, e, list);
 		MsgQueueEntryFree(e);
 	}
+}
+
+int MsgQueue_RemoveAll(struct CoAPMessage *m){
+	int res = -1;
+	struct MsgQueueEntry *e, *t;
+
+	int removeCount = 0;
+
+	if (m == NULL) {
+		errno = EINVAL;
+		return -1;
+	}
+	TAILQ_FOREACH_SAFE(e, &QueueHead, list, t) {
+		const unsigned eflags = CoAPMessage_EqualsFlagOnlyToken;
+
+		if (CoAPMessage_Equals(m, e->m, eflags) != 1)
+			continue;
+
+		TAILQ_REMOVE(&QueueHead, e, list);
+		removeCount += 1;
+		res = 0;
+	}
+	MsgQueueEntryFree(e);
+	if (res == -1)
+		errno = ENOENT;
+
+	return res;
 }
 
 int MsgQueue_Remove(struct CoAPMessage *m)
@@ -161,7 +186,7 @@ void MsgQueue_Tick(struct Coala *c)
 			/* resend */
 			Coala_Send(c, e->fd, e->m);
 			ndm_time_get_monotonic(&e->expire);
-			ndm_time_add_sec(&e->expire, EXPIRE_SEC);
+			ndm_time_add_msec(&e->expire, EXPIRATION_TIME);
 			e->attemp++;
 		} else {
 			/* remove */
