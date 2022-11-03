@@ -4,6 +4,7 @@
 #include <coala/CoAPMessage.h>
 #include <coala/Str.h>
 #include <ndm/ip_sockaddr.h>
+#include <ndm/time.h>
 
 #include "ArqBlock1Layer.h"
 #include "Err.h"
@@ -12,8 +13,8 @@
 #include "SecLayer.h"
 #include "SlidingWindow.h"
 #include "SlidingWindowPool.h"
+#include "Constants.h"
 
-#define WINDOW_SIZE	70
 			/* <ip>:<port>_<token> */
 #define TOKEN_SIZE	sizeof("127.127.127.127:65535_123456789abcdef0")
 
@@ -56,7 +57,7 @@ static int Callback(
 	struct CoAPMessage *m, *n = NULL;
 	void **tup = (void **)data;
 
-	if (bf->sent)
+	if (bf->received || ndm_time_left_monotonic_msec(&bf->expire) >= 0)
 		return SlidingWindow_ReadBlockIterCbOk;
 
 	c = tup[0];
@@ -71,7 +72,7 @@ static int Callback(
 	b.szx = szx;
 
 	if ((n = CoAPMessage_Clone(m, CoAPMessage_CloneFlagCb)) == NULL ||
-	    CoAPMessage_AddOptionUint(n, code_win, WINDOW_SIZE) < 0 ||
+	    CoAPMessage_AddOptionUint(n, code_win, DEFAULT_WINDOW_SIZE) < 0 ||
 	    CoAPMessage_AddOptionBlock(n, code_bl, &b) < 0 ||
 	    CoAPMessage_SetPayload(n, d, s)) {
 		CoAPMessage_Free(n);
@@ -87,14 +88,23 @@ static int Callback(
 
 	CoAPMessage_SetId(n, id);
 
-	if (Coala_Send(c, fd, n) < 0) {
+	if (bf->attempts == 3){
+		SlidingWindow_OverflowIndicatorInc(sw);
+	}
+	if (bf->attempts > 0){
+		SlidingWindow_RetransmitsInc(sw);
+	}
+
+	bf->attempts++;
+	ndm_time_get_monotonic(&bf->expire);
+	ndm_time_add_msec(&bf->expire,EXPIRATION_TIME);
+
+	if (bf->attempts == 1 && Coala_Send(c, fd, n) < 0) {
 		CoAPMessage_Free(n);
 		return SlidingWindow_ReadBlockIterCbError;
 	}
 
 	CoAPMessage_Free(n);
-
-	bf->sent = true;
 
 	return SlidingWindow_ReadBlockIterCbOk;
 }
@@ -112,14 +122,14 @@ ArqLayer_OnReceive_Block1_Ack(
 {
 	struct SlidingWindow_BlockFlags bf;
 
-	if (SlidingWindow_GetBlockFlags(sw, b->num, &bf) < 0)
+	if (SlidingWindow_GetBlockFlags(sw, b->num, &bf) < 0){
 		return LayerStack_Stop;
+	}
 
-	bf.received = true;
+	SlidingWindow_AcceptBlock(sw,&bf);
+	SlidingWindow_PidControl(sw);
+
 	SlidingWindow_SetBlockFlags(sw, b->num, &bf);
-
-	bool comp;
-	SlidingWindow_Advance(sw, &comp);
 
 	/* Т.к. сообщение с кодом может прийти в произвольном
 	 * порядке, то сохраняем его */
@@ -128,7 +138,7 @@ ArqLayer_OnReceive_Block1_Ack(
 		SlidingWindowPool_SetCode(c->sw_pool, sw_tok, mc);
 
 	/* Все квитанции получены? */
-	if (comp) {
+	if (CoAPMessage_GetCode(msg) != CoAPMessage_CodeContinue) {
 		CoAPMessage_RemoveOptions(msg,
 			CoAPMessage_OptionCodeBlock1);
 
@@ -140,7 +150,9 @@ ArqLayer_OnReceive_Block1_Ack(
 		int mc = SlidingWindowPool_GetCode(c->sw_pool, sw_tok);
 		if (mc != -1)
 			CoAPMessage_SetCode(msg, mc);
-
+		/* Удаляем все пакеты, связанные с данным окном из MsgQueue */
+		MsgQueue_RemoveAll(msg);
+		SlidingWindow_Log(sw, "U");
 		SlidingWindowPool_Del(c->sw_pool, sw_tok);
 		return LayerStack_Con;
 	}
@@ -179,13 +191,15 @@ ArqLayer_OnReceive_Block1_Con(
 
 	struct SlidingWindow_BlockFlags bf = {0};
 	bf.last = !b->m;
-	if (SlidingWindow_WriteBlock(sw, b->num, d, s, true, &bf) < 0) {
+
+	if (SlidingWindow_WriteBlock(sw, b->num, d, s, false, &bf) < 0) {
 		Err_Set(err, errno, "SlidingWindow_WriteBlock:");
 		return LayerStack_Err;
 	}
-
-	bool comp;
-	SlidingWindow_Advance(sw, &comp);
+	if(!b->m){
+		SlidingWindow_SetTotalBlocks(sw,b->num);
+	}
+	bool comp = SlidingWindow_IsComplete(sw);
 
 	if (comp) {
 		/* Извлечение данных из окна и подмена рабочей нагрузки */
@@ -193,6 +207,8 @@ ArqLayer_OnReceive_Block1_Con(
 			Err_Set(err, errno, "SlidingWindow_Read:");
 			return LayerStack_Err;
 		}
+
+		SlidingWindow_Log(sw,"U");
 
 		SlidingWindowPool_Del(c->sw_pool, sw_tok);
 
@@ -358,7 +374,7 @@ ArqBlock1Layer_OnSend(
 	/* Create window */
 	struct SlidingWindow *sw;
 	if ((sw = SlidingWindow(SlidingWindow_DirOutput, bs,
-				WINDOW_SIZE)) == NULL) {
+				DEFAULT_WINDOW_SIZE)) == NULL) {
 		Err_Set(err, errno, "SlidingWindow:");
 		res = LayerStack_Err;
 		goto out;

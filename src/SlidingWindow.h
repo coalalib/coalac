@@ -12,10 +12,19 @@ enum SlidingWindow_Dir {
 struct SlidingWindow;
 
 struct SlidingWindow_BlockFlags {
-	bool sent	: 1;
 	bool received	: 1;
-	bool last	: 1;
+	bool last		: 1;
+	struct timespec expire;
+	int attempts;
 };
+
+extern int SlidingWindow_Log(struct SlidingWindow* sw,const char * type);
+extern void SlidingWindow_RetransmitsInc(struct SlidingWindow *sw);
+extern void SlidingWindow_OverflowIndicatorInc(struct SlidingWindow *sw);
+extern void SlidingWindow_PidControl(struct SlidingWindow *sw);
+extern void SlidingWindow_AcceptBlock(struct SlidingWindow *sw, struct SlidingWindow_BlockFlags* bf);
+extern void SlidingWindow_SetTotalBlocks(struct SlidingWindow *sw, uint32_t num);
+extern bool SlidingWindow_IsComplete(struct SlidingWindow* sw);
 
 extern struct SlidingWindow *SlidingWindow(enum SlidingWindow_Dir d,
 					   size_t block_size,

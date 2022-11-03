@@ -4,6 +4,7 @@
 #include <coala/CoAPMessage.h>
 #include <coala/Str.h>
 #include <ndm/ip_sockaddr.h>
+#include <ndm/time.h>
 
 #include "ArqBlock2Layer.h"
 #include "Err.h"
@@ -12,8 +13,8 @@
 #include "SecLayer.h"
 #include "SlidingWindow.h"
 #include "SlidingWindowPool.h"
+#include "Constants.h"
 
-#define WINDOW_SIZE	70
 			/* <ip>:<port>_<token> */
 #define TOKEN_SIZE	sizeof("127.127.127.127:65535_123456789abcdef0")
 
@@ -56,7 +57,7 @@ static int Callback(
 	struct CoAPMessage *m, *n = NULL;
 	void **tup = (void **)data;
 
-	if (bf->sent)
+	if (bf->received || ndm_time_left_monotonic_msec(&bf->expire) >= 0)
 		return SlidingWindow_ReadBlockIterCbOk;
 
 	c = tup[0];
@@ -71,7 +72,7 @@ static int Callback(
 	b.szx = szx;
 
 	if ((n = CoAPMessage_Clone(m, 0)) == NULL ||
-	    CoAPMessage_AddOptionUint(n, code_win, WINDOW_SIZE) < 0 ||
+	    CoAPMessage_AddOptionUint(n, code_win, DEFAULT_WINDOW_SIZE) < 0 ||
 	    CoAPMessage_AddOptionBlock(n, code_bl, &b) < 0 ||
 	    CoAPMessage_SetPayload(n, d, s)) {
 		CoAPMessage_Free(n);
@@ -88,15 +89,22 @@ static int Callback(
 	}
 
 	CoAPMessage_SetId(n, id);
-
-	if (Coala_Send(c, fd, n) < 0) {
+	if (!bf->attempts && Coala_Send(c, fd, n) < 0) {
 		CoAPMessage_Free(n);
 		return SlidingWindow_ReadBlockIterCbError;
 	}
 
 	CoAPMessage_Free(n);
+	if (bf->attempts == 3){
+		SlidingWindow_OverflowIndicatorInc(sw);
+	}
+	if (bf->attempts > 0){
+		SlidingWindow_RetransmitsInc(sw);
+	}
 
-	bf->sent = true;
+	bf->attempts++;
+	ndm_time_get_monotonic(&bf->expire);
+	ndm_time_add_msec(&bf->expire,EXPIRATION_TIME);
 
 	return SlidingWindow_ReadBlockIterCbOk;
 }
@@ -210,13 +218,15 @@ ArqBlock2Layer_OnReceive(
 
 		struct SlidingWindow_BlockFlags bf = {0};
 		bf.last = !bl2.m;
-		if (SlidingWindow_WriteBlock(sw, bl2.num, d, s, true, &bf) < 0) {
+		
+		if (SlidingWindow_WriteBlock(sw, bl2.num, d, s, false, &bf) < 0) {
 			Err_Set(err, errno, "SlidingWindow_WriteBlock:");
 			return LayerStack_Err;
 		}
-
-		bool comp;
-		SlidingWindow_Advance(sw, &comp);
+		if (!bl2.m){
+			SlidingWindow_SetTotalBlocks(sw,bl2.num);
+		}
+		bool comp = SlidingWindow_IsComplete(sw);
 
 		/* Создание квитанции и отправка */
 		struct CoAPMessage *a;
@@ -229,7 +239,7 @@ ArqBlock2Layer_OnReceive(
 		}
 
 		/* Последняя квитанция должна иметь код empty */
-		if (!bl2.m)
+		if (comp)
 			CoAPMessage_SetCode(a, CoAPMessage_CodeEmpty);
 
 		CoAPMessage_CopyToken(a, msg);
@@ -240,7 +250,6 @@ ArqBlock2Layer_OnReceive(
 		CoAPMessage_AddOptionUint(a,
 			CoAPMessage_OptionCodeSelectiveRepeatWindowSize,
 			win);
-
 		if (Coala_Send(c, fd, a) < 0) {
 			Err_Set(err, errno, "Coala_Send:");
 			CoAPMessage_Free(a);
@@ -252,6 +261,7 @@ ArqBlock2Layer_OnReceive(
 		if (comp) {
 			size_t s;
 			uint8_t *d;
+			SlidingWindow_Log(sw, "D");
 			if ((d = SlidingWindow_Read(sw, &s)) == NULL) {
 				Err_Set(err, errno, "SlidingWindow_Read:");
 				return LayerStack_Err;
@@ -285,16 +295,17 @@ ArqBlock2Layer_OnReceive(
 		if (SlidingWindow_GetBlockFlags(sw, bl2.num, &bf) < 0)
 			return LayerStack_Stop;
 
-		bf.received = true;
+		SlidingWindow_AcceptBlock(sw, &bf);
+		SlidingWindow_PidControl(sw);
+		
 		if (SlidingWindow_SetBlockFlags(sw, bl2.num, &bf) < 0)
 			return LayerStack_Stop;
 
-		bool comp;
-		SlidingWindow_Advance(sw, &comp);
-
 		MsgQueue_Remove(msg);
-
-		if (comp) {
+		
+		if (CoAPMessage_GetCode(msg) != CoAPMessage_CodeContinue) {
+			MsgQueue_RemoveAll(msg);
+			SlidingWindow_Log(sw, "D");
 			SlidingWindowPool_Del(c->sw_pool, tok_s);
 		} else {
 			void *t[] = {c, m, (void *)CoAPMessage_OptionCodeBlock2,
@@ -357,7 +368,7 @@ ArqBlock2Layer_OnSend(
 
 	/* Create window */
 	if ((sw = SlidingWindow(SlidingWindow_DirOutput, bs,
-				WINDOW_SIZE)) == NULL) {
+				DEFAULT_WINDOW_SIZE)) == NULL) {
 		Err_Set(err, errno, "SlidingWindow:");
 		res = LayerStack_Err;
 		goto out;
@@ -384,7 +395,7 @@ ArqBlock2Layer_OnSend(
 
 	if (CoAPMessage_AddOptionUint(ack,
 			CoAPMessage_OptionCodeSelectiveRepeatWindowSize,
-			WINDOW_SIZE) < 0) {
+			DEFAULT_WINDOW_SIZE) < 0) {
 		Err_Set(err, errno, "CoAPMessage_AddOptionUint:");
 		res = LayerStack_Err;
 		goto out_decref;
