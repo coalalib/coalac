@@ -13,7 +13,7 @@
 #include "SecLayer.h"
 #include "SlidingWindow.h"
 #include "SlidingWindowPool.h"
-#include "constants.h"
+#include "Constants.h"
 
 			/* <ip>:<port>_<token> */
 #define TOKEN_SIZE	sizeof("127.127.127.127:65535_123456789abcdef0")
@@ -89,14 +89,12 @@ static int Callback(
 	CoAPMessage_SetId(n, id);
 
 	if (bf->attempts == 3){
-		overflowIndicatorInc(sw);
+		SlidingWindow_OverflowIndicatorInc(sw);
 	}
 	if (bf->attempts > 0){
-		retransmitsInc(sw);
+		SlidingWindow_RetransmitsInc(sw);
 	}
-	if (bf->attempts > 6){
-		return SlidingWindow_ReadBlockIterCbError;
-	}
+
 	bf->attempts++;
 	ndm_time_get_monotonic(&bf->expire);
 	ndm_time_add_msec(&bf->expire,EXPIRATION_TIME);
@@ -128,8 +126,8 @@ ArqLayer_OnReceive_Block1_Ack(
 		return LayerStack_Stop;
 	}
 
-	accept_block(sw,&bf);
-	pid_control(sw);
+	SlidingWindow_AcceptBlock(sw,&bf);
+	SlidingWindow_PidControl(sw);
 
 	SlidingWindow_SetBlockFlags(sw, b->num, &bf);
 
@@ -154,7 +152,7 @@ ArqLayer_OnReceive_Block1_Ack(
 			CoAPMessage_SetCode(msg, mc);
 		/* Удаляем все пакеты, связанные с данным окном из MsgQueue */
 		MsgQueue_RemoveAll(msg);
-		SlidingWindowLog(sw, "U");
+		SlidingWindow_Log(sw, "U");
 		SlidingWindowPool_Del(c->sw_pool, sw_tok);
 		return LayerStack_Con;
 	}
@@ -186,6 +184,7 @@ ArqLayer_OnReceive_Block1_Con(
 {
 	size_t s;
 	uint8_t *d;
+
 	/* Нет рабочей нагрузки? */
 	if ((d = CoAPMessage_GetPayload(msg, &s, 0)) == NULL)
 		return LayerStack_Stop;
@@ -198,9 +197,9 @@ ArqLayer_OnReceive_Block1_Con(
 		return LayerStack_Err;
 	}
 	if(!b->m){
-		setTotalBlocks(sw,b->num);
+		SlidingWindow_SetTotalBlocks(sw,b->num);
 	}
-	bool comp = isComplete(sw);
+	bool comp = SlidingWindow_IsComplete(sw);
 
 	if (comp) {
 		/* Извлечение данных из окна и подмена рабочей нагрузки */
@@ -209,7 +208,7 @@ ArqLayer_OnReceive_Block1_Con(
 			return LayerStack_Err;
 		}
 
-		SlidingWindowLog(sw,"U");
+		SlidingWindow_Log(sw,"U");
 
 		SlidingWindowPool_Del(c->sw_pool, sw_tok);
 

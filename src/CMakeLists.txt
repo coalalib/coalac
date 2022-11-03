@@ -13,7 +13,6 @@ set (SOURCES
 	Hkdf.c
 	LayerStack.c
 	LogLayer.c
-	Log_utils.c
 	MsgCache.c
 	MsgQueue.c
 	ReqLayer.c

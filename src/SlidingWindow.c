@@ -8,7 +8,7 @@
 #include "SlidingWindow.h"
 #include <ndm/log.h>
 #include <ndm/time.h>
-#include "constants.h"
+#include "Constants.h"
 
 /*
  * Use as param for Read/WriteBlock?
@@ -30,58 +30,62 @@ struct SlidingWindow {
 	bool input;			/* enum? */
 	bool complete;			/* output -> acked all
 					   input -> received all */
-	uint32_t totalBlocks;
-	uint32_t overflowIndicator;
-	uint32_t balancerCounter;
+	uint32_t total_blocks;
+	uint32_t overflow_indicator;
+	uint32_t balancer_counter;
 	uint32_t retransmits;
-	uint32_t tmpRetransmits;
-	struct timespec DownloadStartTime;
+	uint32_t tmp_retransmits;
+	struct timespec download_start_time;
 };
 
-void pid_control(struct SlidingWindow *sw){
-	sw->balancerCounter++;
-	if (sw->balancerCounter % 25 == 0){
-		sw->win_size += (int)((2.0 - sw->retransmits + sw->tmpRetransmits) * 0.98);
-		sw->tmpRetransmits = sw->retransmits;
+void SlidingWindow_PidControl(struct SlidingWindow *sw){
+	sw->balancer_counter++;
+	if (sw->balancer_counter % 25 == 0){
+		sw->win_size += (int)((2.0 - sw->retransmits + sw->tmp_retransmits) * 0.98);
+		sw->tmp_retransmits = sw->retransmits;
 		
-		sw->win_size = MAX(sw->win_size, MIN_WINDOW_SIZE);
-		sw->win_size = MIN(sw->win_size, MAX_WINDOW_SIZE);
+		sw->win_size = NDM_MAX(sw->win_size, MIN_WINDOW_SIZE);
+		sw->win_size = NDM_MIN(sw->win_size, MAX_WINDOW_SIZE);
 	}
 }
 
-void SlidingWindowLog(struct SlidingWindow* sw, const char* type){
-	char *speed = (char*)malloc(10), *size = (char*)malloc(10);
-	ByteCountBinaryBits(sw->block_size * (kh_size(sw->map) + 1) * 1000.0 / (-ndm_time_left_monotonic_msec(&sw->DownloadStartTime)),speed);
-	ByteCountBinary(sw->block_size * (kh_size(sw->map) + 1), size);
+int SlidingWindow_Log(struct SlidingWindow* sw, const char* type){
+	char *speed = (char*)malloc(15), *size = (char*)malloc(15);
+	if (!speed || !size) {
+		return -1;
+	}
+	Str_SpeedFormat(8 * sw->block_size * (kh_size(sw->map) + 1) * 1000.0 / (-ndm_time_left_monotonic_msec(&sw->download_start_time)),speed,15);
+	Str_SizeFormat(sw->block_size * (kh_size(sw->map) + 1), size, 15);
 	NDM_LOG_INFO("COALA %s: %s, %s, Packets: %d Lost: %d, FinalWSize: %ld",
 		type,speed,size, kh_size(sw->map),sw->retransmits, sw->win_size);
 	free(speed);
 	free(size);
+	return 0;
 }
 
-void accept_block(struct SlidingWindow *sw, struct SlidingWindow_BlockFlags* bf){
+void SlidingWindow_AcceptBlock(struct SlidingWindow *sw, struct SlidingWindow_BlockFlags* bf){
 	if (!bf->received){
 		sw->relative_off++;
 		if (bf->attempts > 3)
-			sw->overflowIndicator--;
+			sw->overflow_indicator--;
 		bf->received = true;
 	}
 }
 
-void retransmitsInc(struct SlidingWindow *sw){
+void SlidingWindow_RetransmitsInc(struct SlidingWindow *sw){
 	sw->retransmits++;
 }
 
-void overflowIndicatorInc(struct SlidingWindow *sw){
-	sw->overflowIndicator++;
+void SlidingWindow_OverflowIndicatorInc(struct SlidingWindow *sw){
+	sw->overflow_indicator++;
 }
 
-void setTotalBlocks(struct SlidingWindow *sw, uint32_t num){
-	sw->totalBlocks = num;
+void SlidingWindow_SetTotalBlocks(struct SlidingWindow *sw, uint32_t num){
+	sw->total_blocks = num;
 }
 
-bool isComplete(struct SlidingWindow* sw){
-	return (kh_size(sw->map) == sw->totalBlocks + 1) && sw->totalBlocks;
+bool SlidingWindow_IsComplete(struct SlidingWindow* sw){
+	return (kh_size(sw->map) == sw->total_blocks + 1) && sw->total_blocks;
 }
 
 bool SlidingWindow_IsRx(struct SlidingWindow *sw)
@@ -109,13 +113,13 @@ struct SlidingWindow *SlidingWindow(enum SlidingWindow_Dir d,
 	sw->input = (d == SlidingWindow_DirInput);
 	sw->block_size = block_size;
 	sw->win_size = win_size;
-	sw->totalBlocks = 0;
+	sw->total_blocks = 0;
 	sw->relative_off = 0;
-	sw->overflowIndicator = 0;
-	sw->balancerCounter = 0;
+	sw->overflow_indicator = 0;
+	sw->balancer_counter = 0;
 	sw->retransmits = 0;
-	sw->tmpRetransmits = 0;
-	ndm_time_get_monotonic(&sw->DownloadStartTime);
+	sw->tmp_retransmits = 0;
+	ndm_time_get_monotonic(&sw->download_start_time);
 	goto out;
 
 out_free:
@@ -222,7 +226,7 @@ void *SlidingWindow_Read(struct SlidingWindow *sw, size_t *s)
 	if (sw == NULL) {
 		errsv = EINVAL;
 		goto out;
-	} else if (!isComplete(sw)) {
+	} else if (!SlidingWindow_IsComplete(sw)) {
 		errno = ENODATA;
 		goto out;
 	}
@@ -261,7 +265,7 @@ out:
 
 static inline bool InWindow(unsigned block_num, struct SlidingWindow* sw)
 {
-	return block_num >= sw->off && block_num < (sw->overflowIndicator == 0 ? sw->relative_off + sw->win_size : sw->off + sw->win_size);
+	return block_num >= sw->off && block_num < (sw->overflow_indicator == 0 ? sw->relative_off + sw->win_size : sw->off + sw->win_size);
 }
 
 
@@ -305,7 +309,7 @@ int SlidingWindow_WriteBlock(struct SlidingWindow *sw, unsigned block_num,
 	khiter_t it;
 	struct Block *b;
 	void *d;
-	
+
 	if (sw == NULL || data == NULL || !size) {
 		errno = EINVAL;
 		return -1;
@@ -327,7 +331,7 @@ int SlidingWindow_WriteBlock(struct SlidingWindow *sw, unsigned block_num,
 		return -1;
 	} else if (!ret) {
 		errno = EEXIST;
-		return 0;
+		return 1;
 	}
 
 	if ((b = calloc(1, sizeof(*b))) == NULL ||
@@ -472,7 +476,7 @@ int SlidingWindow_Advance(struct SlidingWindow *sw, bool *complete)
 
 	beg = sw->off;
 	end = beg + sw->win_size;
-	
+
 	for (i = beg; i < end; i++) {
 		khiter_t it;
 		struct Block *b;

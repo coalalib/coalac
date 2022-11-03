@@ -6,7 +6,7 @@
 #include <coala/Coala.h>
 #include <coala/CoAPMessage.h>
 #include <ndm/time.h>
-#include "constants.h"
+#include "Constants.h"
 
 #include "MsgQueue.h"
 
@@ -81,8 +81,6 @@ int MsgQueue_RemoveAll(struct CoAPMessage *m){
 	int res = -1;
 	struct MsgQueueEntry *e, *t;
 
-	int removeCount = 0;
-
 	if (m == NULL) {
 		errno = EINVAL;
 		return -1;
@@ -94,10 +92,11 @@ int MsgQueue_RemoveAll(struct CoAPMessage *m){
 			continue;
 
 		TAILQ_REMOVE(&QueueHead, e, list);
-		removeCount += 1;
+		MsgQueueEntryFree(e);
+
 		res = 0;
 	}
-	MsgQueueEntryFree(e);
+
 	if (res == -1)
 		errno = ENOENT;
 
